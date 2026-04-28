@@ -3894,3 +3894,150 @@ if (document.readyState === 'loading') {
   };
 })();
 
+
+/* v24 packing SVG + display-score/ranking-score real fix */
+(function(){
+  if (!window.app && typeof app !== 'undefined') window.app = app;
+  if (!window.app) return;
+  const app = window.app;
+
+  app.normalizeDisplayScoreV24 = function(result) {
+    let score = Number(result && result.compatibilityScore ? result.compatibilityScore : 0);
+    if (!Number.isFinite(score)) score = 70;
+    const risks = Array.isArray(result.risks) ? result.risks : [];
+    const riskText = risks.map(r => String(r.text || '').toLowerCase()).join(' ');
+    const highRisks = risks.filter(r => r.level === 'high').length;
+    const mediumRisks = risks.filter(r => r.level === 'medium').length;
+    if (score >= 98) score = 88 + Math.min(8, Math.round((score - 90) / 2));
+    if (riskText.includes('тело выбрано неудачно') || riskText.includes('слаб для роли центра')) score = Math.min(score, 72);
+    if (riskText.includes('спорн') || riskText.includes('риск')) score = Math.min(score, 78);
+    score -= highRisks * 10 + mediumRisks * 4;
+    if (score < 45 && !highRisks) score = 45;
+    return this.clampInt(Math.round(score), 35, 96);
+  };
+
+  app.labelByScoreV24 = function(score) {
+    if (score >= 88) return 'excellent';
+    if (score >= 78) return 'good';
+    if (score >= 66) return 'mid';
+    if (score >= 50) return 'risky';
+    return 'bad';
+  };
+
+  if (!app._v24BaseBuildMethodologyVariant && typeof app.buildMethodologyVariant === 'function') {
+    app._v24BaseBuildMethodologyVariant = app.buildMethodologyVariant.bind(app);
+  }
+
+  app.buildMethodologyVariant = function(combo, style, coolingLevel, concept, history) {
+    const neutralHistory = { cursor:0, flavorUsage:{}, bodyUsage:{}, comboUsage:{}, conceptUsage:{} };
+    const evaluated = this._v24BaseBuildMethodologyVariant(combo, style, coolingLevel, concept, neutralHistory);
+    if (!evaluated) return null;
+
+    const h = history || neutralHistory;
+    const bodyKey = evaluated._historyBodyKey || ((evaluated.bodyName || '') + '|body');
+    const comboKey = evaluated._historyComboKey || (evaluated.items || []).filter(i => i.role !== 'cooler').map(i => `${i.brand}|${i.name}`).sort().join('::') + '|' + (concept && concept.key || 'concept');
+    const conceptKey = evaluated._historyConceptKey || (concept && concept.key) || (evaluated.mixConcept || 'concept');
+    const flavorKeys = evaluated._historyFlavorKeys || (evaluated.items || []).filter(i => i.role !== 'cooler').map(i => `${i.brand}|${i.name}`);
+
+    const displayScore = this.normalizeDisplayScoreV24(evaluated);
+    evaluated.compatibilityScore = displayScore;
+    evaluated.compatibilityLabel = this.labelByScoreV24(displayScore);
+    if (evaluated.scoreBreakdown) evaluated.scoreBreakdown.total = displayScore;
+
+    const coverageBonus = flavorKeys.reduce((sum, key) => sum + Math.max(0, 4 - (h.flavorUsage[key] || 0)) * 7, 0);
+    const bodyPenalty = (h.bodyUsage[bodyKey] || 0) * 28;
+    const comboPenalty = (h.comboUsage[comboKey] || 0) * 42;
+    const conceptPenalty = (h.conceptUsage[conceptKey] || 0) * 14;
+    evaluated._rankingScore = displayScore + coverageBonus - bodyPenalty - comboPenalty - conceptPenalty;
+    evaluated._historyBodyKey = bodyKey;
+    evaluated._historyComboKey = comboKey;
+    evaluated._historyFlavorKeys = flavorKeys;
+    evaluated._historyConceptKey = conceptKey;
+    return evaluated;
+  };
+
+  app.rotateManualVariants = function(variants, selected, targetCount, style, coolingLevel, resultCount) {
+    if (!variants || !variants.length) return [];
+    const signature = this.buildGenerationSignature(selected, targetCount, style, coolingLevel);
+    const history = this.state.generationHistory[signature] || { cursor:0, flavorUsage:{}, bodyUsage:{}, comboUsage:{}, conceptUsage:{} };
+    const sorted = [...variants].sort((a,b) => (b._rankingScore ?? b.compatibilityScore ?? 0) - (a._rankingScore ?? a.compatibilityScore ?? 0));
+    const out = [];
+    const usedBodies = new Set();
+    const usedCombos = new Set();
+    const usedConcepts = new Set();
+    for (const v of sorted) {
+      if (out.length >= resultCount) break;
+      const bodyOk = !usedBodies.has(v._historyBodyKey) || out.length >= 2;
+      const comboOk = !usedCombos.has(v._historyComboKey);
+      const conceptOk = !usedConcepts.has(v._historyConceptKey) || out.length >= 3;
+      if (out.length === 0 || (comboOk && (bodyOk || conceptOk))) {
+        out.push(v);
+        usedBodies.add(v._historyBodyKey);
+        usedCombos.add(v._historyComboKey);
+        usedConcepts.add(v._historyConceptKey);
+      }
+    }
+    for (const v of sorted) {
+      if (out.length >= resultCount) break;
+      if (!out.includes(v)) out.push(v);
+    }
+    out.forEach(v => {
+      history.comboUsage[v._historyComboKey] = (history.comboUsage[v._historyComboKey] || 0) + 1;
+      history.bodyUsage[v._historyBodyKey] = (history.bodyUsage[v._historyBodyKey] || 0) + 1;
+      history.conceptUsage[v._historyConceptKey] = (history.conceptUsage[v._historyConceptKey] || 0) + 1;
+      (v._historyFlavorKeys || []).forEach(k => history.flavorUsage[k] = (history.flavorUsage[k] || 0) + 1);
+    });
+    this.state.generationHistory[signature] = history;
+    if (this.saveData) this.saveData();
+    return out;
+  };
+
+  app.buildPackingVisualization = function(items, style) {
+    const packing = this.getPackingStyle ? this.getPackingStyle() : (style || 'sectors');
+    const colors = ['#ef4444','#f59e0b','#84cc16','#22c55e','#06b6d4','#a855f7','#ec4899'];
+    const esc = (s) => this.escapeHtml(String(s || ''));
+    const safeItems = (items || []).filter(i => Number(i.percent || 0) > 0);
+    if (!safeItems.length) return '<div style="color:#a4b3d9">Нет состава для визуализации</div>';
+
+    if (packing === 'layers') {
+      const rows = [...safeItems].reverse();
+      return `<div style="display:grid;grid-template-columns:minmax(220px,1fr) 220px;gap:16px;align-items:center;min-height:210px">
+        <div style="border:1px solid rgba(124,145,255,.22);border-radius:18px;padding:12px;background:rgba(8,12,24,.45);display:flex;flex-direction:column-reverse;gap:4px;min-height:190px;justify-content:flex-start;overflow:hidden">
+          ${rows.map((item, idx) => `<div style="height:${Math.max(18, Number(item.percent)*2.1)}px;background:${colors[(rows.length-1-idx)%colors.length]};border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:12px;text-shadow:0 1px 4px rgba(0,0,0,.65);min-height:18px">${esc(item.name)} ${Number(item.percent)}%</div>`).join('')}
+        </div>
+        <div style="display:grid;gap:8px">${safeItems.map((item, idx) => `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid rgba(124,145,255,.16);border-radius:12px;background:rgba(255,255,255,.04)"><span style="width:12px;height:12px;border-radius:50%;background:${colors[idx%colors.length]};flex:0 0 auto"></span><span style="font-weight:800;color:#f3f7ff">${esc(item.name)}</span><span style="margin-left:auto;color:#fff;font-weight:900">${Number(item.percent)}%</span></div>`).join('')}</div>
+      </div>`;
+    }
+
+    const total = safeItems.reduce((sum, item) => sum + Number(item.percent || 0), 0) || 100;
+    let angle = -90;
+    const cx = 110, cy = 110, r = 88, inner = 34;
+    function polar(a, radius) {
+      const rad = (Math.PI / 180) * a;
+      return [cx + radius * Math.cos(rad), cy + radius * Math.sin(rad)];
+    }
+    function sectorPath(start, end) {
+      const large = end - start > 180 ? 1 : 0;
+      const [x1,y1] = polar(start, r);
+      const [x2,y2] = polar(end, r);
+      const [x3,y3] = polar(end, inner);
+      const [x4,y4] = polar(start, inner);
+      return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} L ${x3.toFixed(2)} ${y3.toFixed(2)} A ${inner} ${inner} 0 ${large} 0 ${x4.toFixed(2)} ${y4.toFixed(2)} Z`;
+    }
+    const paths = safeItems.map((item, idx) => {
+      const start = angle;
+      const end = angle + (Number(item.percent || 0) / total) * 360;
+      angle = end;
+      return `<path d="${sectorPath(start, end)}" fill="${colors[idx%colors.length]}" stroke="#070b16" stroke-width="3"><title>${esc(item.name)} ${Number(item.percent)}%</title></path>`;
+    }).join('');
+
+    return `<div style="display:grid;grid-template-columns:240px minmax(180px,1fr);gap:18px;align-items:center;min-height:230px">
+      <svg viewBox="0 0 220 220" width="220" height="220" role="img" aria-label="Секторная схема забивки" style="display:block;margin:auto;filter:drop-shadow(0 12px 22px rgba(0,0,0,.35))">
+        <circle cx="110" cy="110" r="96" fill="rgba(255,255,255,.03)" stroke="rgba(255,255,255,.18)" stroke-width="4"/>
+        ${paths}
+        <circle cx="110" cy="110" r="34" fill="#070b16" stroke="rgba(255,255,255,.18)" stroke-width="3"/>
+      </svg>
+      <div style="display:grid;gap:8px">${safeItems.map((item, idx) => `<div style="display:flex;align-items:center;gap:8px;padding:9px 10px;border:1px solid rgba(124,145,255,.16);border-radius:12px;background:rgba(255,255,255,.04)"><span style="width:12px;height:12px;border-radius:50%;background:${colors[idx%colors.length]};flex:0 0 auto"></span><span style="font-weight:800;color:#f3f7ff">${esc(item.name)}</span><span style="margin-left:auto;color:#fff;font-weight:900">${Number(item.percent)}%</span></div>`).join('')}</div>
+    </div>`;
+  };
+})();
