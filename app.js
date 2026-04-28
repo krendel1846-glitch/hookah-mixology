@@ -3341,6 +3341,12 @@ app.buildManualResults = function(selected, style, coolingLevel, fixedCompositio
   return this.rotateManualVariants(diversified.length ? diversified : unique, workingFlavors, desiredCount, style, coolingLevel, resultCount);
 };
 
+window.app = app;
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => window.app.init());
+} else {
+  window.app.init();
+}
 
 /* v19 full manual pipeline rewrite + packing visual */
 (function(){
@@ -3816,26 +3822,16 @@ app.buildManualResults = function(selected, style, coolingLevel, fixedCompositio
   };
 })();
 
-/* v21 clean bootstrap and manual-result safety overrides */
+/* v22 result-count and launch fixes */
 (function(){
-  app.roleLabels = Object.assign({}, app.roleLabels || {}, {
-    body: 'Тело / база',
-    core: 'Ядро / тело',
-    support: 'Поддержка',
-    support2: 'Поддержка 2',
-    enhancer: 'Усилитель',
-    bridge: 'Связка',
-    accent: 'Акцент',
-    rounder: 'Округлитель',
-    refresher: 'Освежитель',
-    cooler: 'Охладитель',
-    deepener: 'Углубитель',
-    softener: 'Смягчитель',
-    contrast: 'Контраст',
-    dessert_base: 'Десертная база',
-    acidic_correction: 'Кислая коррекция',
-    aromatic_touch: 'Ароматический штрих'
-  });
+  if (!window.app && typeof app !== 'undefined') window.app = app;
+  if (!window.app) return;
+
+  app.getRequestedResultCount = function(defaultValue = 1) {
+    const el = document.getElementById('result-count');
+    const n = parseInt(el && el.value ? el.value : String(defaultValue), 10);
+    return Math.max(1, Number.isFinite(n) ? n : defaultValue);
+  };
 
   app.generate = function() {
     const resultsArea = document.getElementById('results-area');
@@ -3843,24 +3839,25 @@ app.buildManualResults = function(selected, style, coolingLevel, fixedCompositio
       if (resultsArea) resultsArea.innerHTML = '<div class="card notice">Сначала загрузи базу вкусов.</div>';
       return;
     }
+
     const mode = document.getElementById('gen-mode').value;
     const requestedCount = parseInt(document.getElementById('gen-count').value, 10);
     const style = document.getElementById('gen-style').value;
     const coolingLevel = document.getElementById('cooling-level').value;
-    const selectedResultCount = parseInt(document.getElementById('result-count').value, 10);
-    const resultCount = mode === 'manual' ? Math.max(3, selectedResultCount || 3) : (selectedResultCount || 3);
+    const resultCount = this.getRequestedResultCount(1);
     const fixedComposition = document.getElementById('fixed-composition').value === 'yes';
     const selected = this.collectSelectedFlavors();
 
-    if (resultsArea) resultsArea.innerHTML = '<div class="card text-center">⏳ Строю разные концепции, роли, проценты и визуал забивки…</div>';
+    if (resultsArea) resultsArea.innerHTML = '<div class="card text-center">⏳ Анализирую роли, тело микса, проценты и совместимость…</div>';
+
     setTimeout(() => {
       try {
         let results = [];
         if (mode === 'manual' && selected.length >= 2) {
           const targetCount = Math.max(2, Math.min(requestedCount, selected.length));
-          results = this.buildManualResults(selected, style, coolingLevel, fixedComposition, false, targetCount, resultCount);
+          results = this.buildManualResults(selected, style, coolingLevel, fixedComposition, false, targetCount, Math.max(resultCount, 6));
         } else {
-          results = this.buildAutomaticResults(requestedCount, style, coolingLevel, resultCount);
+          results = this.buildAutomaticResults(requestedCount, style, coolingLevel, Math.max(resultCount, 6));
         }
         if (!results.length) {
           if (resultsArea) resultsArea.innerHTML = '<div class="card notice">Не удалось собрать хорошие варианты. Попробуй другой стиль, меньше вкусов или загрузи больше базы.</div>';
@@ -3883,12 +3880,11 @@ app.buildManualResults = function(selected, style, coolingLevel, fixedCompositio
     const coolingLevel = document.getElementById('cooling-level').value;
     const fixedComposition = document.getElementById('fixed-composition').value === 'yes';
     const requestedCount = parseInt(document.getElementById('gen-count').value, 10);
-    const selectedResultCount = parseInt(document.getElementById('result-count').value, 10);
-    const resultCount = Math.max(5, selectedResultCount || 5);
+    const resultCount = this.getRequestedResultCount(1);
     try {
       const targetCount = Math.max(2, Math.min(requestedCount, selected.length));
-      const results = this.buildManualResults(selected, style, coolingLevel, fixedComposition, true, targetCount, resultCount);
-      this.renderResults(results, { mode:'manual', style, coolingLevel });
+      const results = this.buildManualResults(selected, style, coolingLevel, fixedComposition, true, targetCount, Math.max(resultCount, 8));
+      this.renderResults(results.slice(0, resultCount), { mode:'manual', style, coolingLevel });
       this.switchTab('results', document.querySelector('.nav-btn[data-tab="results"]'));
     } catch (error) {
       console.error('Alternative generation failed:', error);
@@ -3896,11 +3892,5 @@ app.buildManualResults = function(selected, style, coolingLevel, fixedCompositio
       this.switchTab('results', document.querySelector('.nav-btn[data-tab="results"]'));
     }
   };
-
-  window.app = app;
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => window.app.init());
-  } else {
-    window.app.init();
-  }
 })();
+
