@@ -4041,3 +4041,241 @@ if (document.readyState === 'loading') {
     </div>`;
   };
 })();
+
+/* v25 UI + scoring polish: RU labels, stricter scoring, better packing visuals, smarter role/cooling output */
+(function(){
+  if (!window.app && typeof app !== 'undefined') window.app = app;
+  if (!window.app) return;
+  const app = window.app;
+
+  app.conceptLabelRuV25 = function(value) {
+    const key = String(value || '').toLowerCase().replace(/\s+/g, '_').replace(/-/g, '_');
+    const map = {
+      body_forward: 'Тело вперёд',
+      balanced: 'Баланс',
+      dual_body: 'Двойное тело',
+      accent_forward: 'Акцент вперёд',
+      bridge_softened: 'Через связку',
+      fresh_lifted: 'Свежий подъём',
+      dessert_rounded: 'Десертное округление',
+      contrast_built: 'Контрастная сборка',
+      commercial_safe: 'Коммерчески безопасно',
+      authorial_signature: 'Авторская сигнатура',
+      good: 'Хорошо',
+      mid: 'Условно хорошо',
+      excellent: 'Отлично',
+      risky: 'Рискованно',
+      bad: 'Слабо'
+    };
+    return map[key] || map[String(value || '').toLowerCase()] || String(value || 'Вариант');
+  };
+
+  const oldLabelToRuV25 = app.labelToRu ? app.labelToRu.bind(app) : (x => x);
+  app.labelToRu = function(label) {
+    const map = {
+      excellent: 'Отлично',
+      good: 'Хорошо',
+      mid: 'Условно хорошо',
+      risky: 'Спорно / рискованно',
+      bad: 'Слабо',
+      super_compatible: 'Отлично',
+      very_strong: 'Очень хорошо',
+      strong: 'Хорошо',
+      decent: 'Условно хорошо',
+      weak_to_moderate: 'Спорно',
+      problematic: 'Рискованно',
+      poor: 'Плохо',
+      incompatible: 'Несовместимо',
+      universal: 'универсальный',
+      fresh: 'свежий',
+      fruity: 'фруктовый',
+      berry: 'ягодный',
+      citrus: 'цитрусовый',
+      dessert: 'десертный',
+      tea: 'чайный',
+      spicy: 'пряный',
+      balanced: 'сбалансированный',
+      authorial: 'авторский'
+    };
+    return map[label] || this.conceptLabelRuV25(label) || oldLabelToRuV25(label);
+  };
+
+  app.roleLabels = Object.assign({}, app.roleLabels || {}, {
+    body: 'Тело / база', core: 'Ядро', support: 'Поддержка', support2: 'Вторая поддержка', body2: 'Второе тело',
+    bridge: 'Связка', rounder: 'Округлитель', accent: 'Акцент', contrast: 'Контраст', refresher: 'Освежитель',
+    cooler: 'Охладитель', deepener: 'Углубитель', softener: 'Смягчитель', acidic_correction: 'Кислая коррекция', aromatic_touch: 'Ароматический штрих'
+  });
+
+  app.compatibilityLabelV25 = function(score) {
+    if (score >= 90) return 'excellent';
+    if (score >= 80) return 'good';
+    if (score >= 70) return 'mid';
+    if (score >= 55) return 'risky';
+    return 'bad';
+  };
+
+  app.normalizeDisplayScoreV25 = function(result) {
+    let score = Number(result && result.compatibilityScore ? result.compatibilityScore : 0);
+    if (!Number.isFinite(score) || score <= 0) score = 68;
+    const br = result.scoreBreakdown || {};
+    const risks = Array.isArray(result.risks) ? result.risks : [];
+    const riskText = risks.map(r => String(r.text || '').toLowerCase()).join(' ');
+    const highRisks = risks.filter(r => r.level === 'high').length;
+    const mediumRisks = risks.filter(r => r.level === 'medium').length;
+    const items = Array.isArray(result.items) ? result.items : [];
+    const body = items.find(i => i.role === 'body') || items[0] || null;
+    const cooler = items.find(i => i.role === 'cooler');
+
+    if (score >= 98) score = 88 + Math.min(5, Math.round((score - 90) * 0.35));
+    else if (score >= 94) score = 87 + Math.round((score - 90) * 0.45);
+    if (Number.isFinite(br.bodyQuality) && br.bodyQuality < 10) score = Math.min(score, 78);
+    if (Number.isFinite(br.roleLogic) && br.roleLogic < 16) score = Math.min(score, 84);
+    if (Number.isFinite(br.sensoryCompatibility) && br.sensoryCompatibility < 18) score = Math.min(score, 82);
+    if (Number.isFinite(br.cohesionAndReadability) && br.cohesionAndReadability < 8) score = Math.min(score, 80);
+    if (body && body.analysis && body.analysis.roleSuit && Number(body.analysis.roleSuit.body) < 5) score = Math.min(score, 72);
+    if (riskText.includes('тело выбрано неудачно') || riskText.includes('слаб для роли центра')) score = Math.min(score, 72);
+    if (riskText.includes('спорн') || riskText.includes('риск')) score = Math.min(score, 78);
+    if (cooler && Number(cooler.percent || 0) >= 12) score = Math.min(score, 88);
+    score -= highRisks * 9 + mediumRisks * 3;
+    if (score < 45 && highRisks === 0) score = 45;
+    return this.clampInt(Math.round(score), 35, 94);
+  };
+
+  app.buildRoleArchitectureV25 = function(items) {
+    const byRole = (roles) => (items || []).filter(i => roles.includes(i.role)).map(i => `${i.name}${i.percent ? ' ' + i.percent + '%' : ''}`);
+    return {
+      suggestedBody: byRole(['body','core'])[0] || ((items && items[0] && items[0].name) || ''),
+      mainSupport: byRole(['support','support2','body2']),
+      bridges: byRole(['bridge']),
+      rounders: byRole(['rounder','softener']),
+      accents: byRole(['accent','contrast','acidic_correction','aromatic_touch']),
+      refreshers: byRole(['refresher']),
+      coolers: byRole(['cooler'])
+    };
+  };
+
+  app.conceptCommentV25 = function(conceptKey) {
+    const map = {
+      body_forward: 'Тело выведено вперёд: микс читается проще и понятнее, остальные вкусы обслуживают центральный профиль.',
+      balanced: 'Баланс: роли распределены ровно, без чрезмерного доминирования одного компонента.',
+      dual_body: 'Двойное тело: два вкуса работают как почти равные центры, профиль получается сложнее и плотнее.',
+      accent_forward: 'Акцент вперёд: верхняя нота заметнее, но процент остаётся под контролем, чтобы не забить тело.',
+      bridge_softened: 'Связка смягчает переход между направлениями и делает микс чище.',
+      fresh_lifted: 'Свежий подъём: микс раскрывается бодрее, с более лёгким и дневным характером.',
+      dessert_rounded: 'Десертное округление: острые углы сглажены, вкус становится мягче и плотнее.',
+      contrast_built: 'Контрастная сборка: вкусы специально разведены по полюсам, но баланс удерживается процентами.',
+      commercial_safe: 'Коммерчески безопасный вариант: понятный профиль, минимум риска и предсказуемое раскрытие.',
+      authorial_signature: 'Авторская сигнатура: больше слоёв и нюансов, но требуется аккуратный контроль жара.'
+    };
+    return map[conceptKey] || 'Вариант отличается распределением ролей и процентов на том же наборе вкусов.';
+  };
+
+  if (!app._v25BaseBuildMethodologyVariant && typeof app.buildMethodologyVariant === 'function') {
+    app._v25BaseBuildMethodologyVariant = app.buildMethodologyVariant.bind(app);
+  }
+
+  app.buildMethodologyVariant = function(combo, style, coolingLevel, concept, history) {
+    const evaluated = this._v25BaseBuildMethodologyVariant(combo, style, coolingLevel, concept, history);
+    if (!evaluated) return null;
+    const conceptKey = evaluated._historyConceptKey || (concept && concept.key) || String(evaluated.mixConcept || 'balanced').toLowerCase().replace(/\s+/g, '_');
+    const conceptRu = this.conceptLabelRuV25(conceptKey);
+    evaluated.mixConcept = conceptRu;
+    evaluated.styleVariant = conceptRu;
+    evaluated.conceptComment = this.conceptCommentV25(conceptKey);
+    const polishedScore = this.normalizeDisplayScoreV25(evaluated);
+    evaluated.compatibilityScore = polishedScore;
+    evaluated.compatibilityLabel = this.compatibilityLabelV25(polishedScore);
+    if (evaluated.scoreBreakdown) evaluated.scoreBreakdown.total = polishedScore;
+    evaluated.architecture = Object.assign({}, evaluated.architecture || {}, this.buildRoleArchitectureV25(evaluated.items || []));
+    const cooler = (evaluated.items || []).find(i => i.role === 'cooler');
+    evaluated.actions = Array.isArray(evaluated.actions) ? evaluated.actions.slice() : [];
+    if (cooler) {
+      const coolingText = `Холод встроен в общую смесь: ${cooler.percent}% ${cooler.name}.`;
+      if (!evaluated.actions.some(a => String(a).includes('Холод встроен'))) evaluated.actions.unshift(coolingText);
+      if (Number(cooler.percent || 0) >= 12) {
+        evaluated.risks = Array.isArray(evaluated.risks) ? evaluated.risks.slice() : [];
+        if (!evaluated.risks.some(r => String(r.text || '').includes('съесть тело'))) {
+          evaluated.risks.push({ level:'medium', text:'Яркий холод может съесть тело микса. Контролируй жар и не перегревай чашу.' });
+        }
+      }
+    }
+    evaluated.whyWorks = `Концепция «${conceptRu}»: ${evaluated.bodyName} держит центр, остальные компоненты распределены по ролям и процентам под запрос «${this.labelToRu(style)}».`;
+    return evaluated;
+  };
+
+  app.buildPackingVisualization = function(items, style) {
+    const packing = this.getPackingStyle ? this.getPackingStyle() : (style || 'sectors');
+    const colors = ['#ef4444','#f59e0b','#84cc16','#22c55e','#06b6d4','#a855f7','#ec4899'];
+    const esc = (s) => this.escapeHtml(String(s || ''));
+    const safeItems = (items || []).filter(i => Number(i.percent || 0) > 0);
+    if (!safeItems.length) return '<div style="color:#a4b3d9">Нет состава для визуализации</div>';
+
+    if (packing === 'layers') {
+      const rows = [...safeItems].reverse();
+      return `<div style="display:grid;grid-template-columns:minmax(240px,1fr) minmax(190px,240px);gap:18px;align-items:center;min-height:260px">
+        <div style="position:relative;min-height:245px;padding:18px 22px 22px;border:1px solid rgba(124,145,255,.22);border-radius:26px;background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(255,255,255,.02));overflow:hidden;box-shadow:inset 0 0 0 2px rgba(255,255,255,.035)">
+          <div style="position:absolute;left:16px;right:16px;top:12px;height:16px;border:2px solid rgba(255,255,255,.20);border-bottom:none;border-radius:999px 999px 0 0"></div>
+          <div style="position:absolute;top:8px;left:50%;transform:translateX(-50%);font-size:11px;color:#ffb347;font-weight:900;letter-spacing:.06em">ЖАР ↓</div>
+          <div style="display:flex;flex-direction:column-reverse;gap:5px;min-height:205px;justify-content:flex-start;padding-top:22px">
+            ${rows.map((item, idx) => `<div style="height:${Math.max(20, Number(item.percent)*2.35)}px;background:${colors[(rows.length-1-idx)%colors.length]};border-radius:10px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;font-size:12px;text-shadow:0 1px 4px rgba(0,0,0,.72);box-shadow:inset 0 1px 0 rgba(255,255,255,.20)">${esc(item.name)} ${Number(item.percent)}%</div>`).join('')}
+          </div>
+        </div>
+        <div style="display:grid;gap:9px">${safeItems.map((item, idx) => `<div style="display:flex;align-items:center;gap:9px;padding:10px 11px;border:1px solid rgba(124,145,255,.16);border-radius:14px;background:rgba(255,255,255,.045)"><span style="width:12px;height:12px;border-radius:50%;background:${colors[idx%colors.length]};flex:0 0 auto"></span><span style="font-weight:850;color:#f3f7ff;line-height:1.2">${esc(item.name)}</span><span style="margin-left:auto;color:#fff;font-weight:950">${Number(item.percent)}%</span></div>`).join('')}</div>
+      </div>`;
+    }
+
+    const total = safeItems.reduce((sum, item) => sum + Number(item.percent || 0), 0) || 100;
+    let angle = -90;
+    const cx = 130, cy = 130, r = 105, inner = 38;
+    function polar(a, radius) { const rad = (Math.PI / 180) * a; return [cx + radius * Math.cos(rad), cy + radius * Math.sin(rad)]; }
+    function sectorPath(start, end) {
+      const large = end - start > 180 ? 1 : 0;
+      const [x1,y1] = polar(start, r), [x2,y2] = polar(end, r), [x3,y3] = polar(end, inner), [x4,y4] = polar(start, inner);
+      return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} L ${x3.toFixed(2)} ${y3.toFixed(2)} A ${inner} ${inner} 0 ${large} 0 ${x4.toFixed(2)} ${y4.toFixed(2)} Z`;
+    }
+    const paths = safeItems.map((item, idx) => { const start = angle, end = angle + (Number(item.percent || 0) / total) * 360; angle = end; return `<path d="${sectorPath(start, end)}" fill="${colors[idx%colors.length]}" stroke="#070b16" stroke-width="4"><title>${esc(item.name)} ${Number(item.percent)}%</title></path>`; }).join('');
+    return `<div style="display:grid;grid-template-columns:280px minmax(190px,1fr);gap:20px;align-items:center;min-height:270px">
+      <svg viewBox="0 0 260 260" width="260" height="260" role="img" aria-label="Секторная схема забивки" style="display:block;margin:auto;filter:drop-shadow(0 16px 26px rgba(0,0,0,.42))">
+        <circle cx="130" cy="130" r="116" fill="rgba(255,255,255,.035)" stroke="rgba(255,255,255,.20)" stroke-width="5"/>
+        ${paths}
+        <circle cx="130" cy="130" r="38" fill="#070b16" stroke="rgba(255,255,255,.24)" stroke-width="4"/>
+      </svg>
+      <div style="display:grid;gap:9px">${safeItems.map((item, idx) => `<div style="display:flex;align-items:center;gap:9px;padding:10px 11px;border:1px solid rgba(124,145,255,.16);border-radius:14px;background:rgba(255,255,255,.045)"><span style="width:12px;height:12px;border-radius:50%;background:${colors[idx%colors.length]};flex:0 0 auto"></span><span style="font-weight:850;color:#f3f7ff;line-height:1.2">${esc(item.name)}</span><span style="margin-left:auto;color:#fff;font-weight:950">${Number(item.percent)}%</span></div>`).join('')}</div>
+    </div>`;
+  };
+
+  app.renderResultCard = function(res, idx) {
+    const score = Number(res.compatibilityScore || 0);
+    const colorClass = this.scoreClass(score);
+    const segColors = ['#6366f1','#ec4899','#10b981','#f59e0b','#0ea5e9','#8b5cf6','#ef4444','#14b8a6'];
+    const riskHtml = (res.risks || []).map(r => `<div class="risk-item risk-${r.level}">${this.escapeHtml(r.text)}</div>`).join('') || '<div class="risk-item risk-low">Критичных рисков не обнаружено. Нужен только контроль прогрева и забивки.</div>';
+    const actionHtml = (res.actions || []).map(a => `<div class="action-item">${this.escapeHtml(a)}</div>`).join('') || '<div class="action-item">Оставить структуру как есть, контролируя жар и плотность забивки.</div>';
+    const packingVisual = this.buildPackingVisualization(res.items || [], this.getPackingStyle());
+    const arch = Object.assign({}, res.architecture || {}, this.buildRoleArchitectureV25(res.items || []));
+    const conceptName = this.conceptLabelRuV25(res._historyConceptKey || res.mixConcept || res.styleVariant);
+    return `
+    <div class="card mix-card">
+      <div class="mix-topline">
+        <div style="flex:1"><div class="flex flex-wrap" style="margin-bottom:8px">
+          <span class="badge ${score>=90 ? 'badge-success' : score>=80 ? 'badge-info' : score>=70 ? 'badge-warning' : 'badge-danger'}">${this.labelToRu(res.compatibilityLabel)}</span>
+          <span class="badge badge-neutral">${this.escapeHtml(conceptName)}</span>
+          <span class="badge badge-info">${this.escapeHtml(conceptName)}</span>
+          <span class="badge badge-primary">Тело: ${this.escapeHtml(res.bodyName)}</span></div>
+          <div class="mix-title">${this.escapeHtml(res.title)}</div><p class="text-sm" style="margin-top:6px">${this.escapeHtml(res.overallVerdict)}</p></div>
+        <div class="score-circle ${colorClass}">${score}%</div></div>
+      <div class="flavor-bar">${(res.items||[]).map((item, i) => `<div class="flavor-segment" style="width:${item.percent}%;background:${segColors[i%segColors.length]}" title="${this.escapeHtml(item.name)} ${item.percent}%"></div>`).join('')}</div>
+      <div class="grid grid-2"><div class="card" style="padding:14px;margin:0"><div class="section-title">Состав и роли</div><div class="flavor-role-list">${(res.items||[]).map(item => `<div class="flavor-role-card"><strong>${item.percent}% — ${this.escapeHtml(item.brand)} ${this.escapeHtml(item.name)}</strong><div class="small-tags"><span class="tag">${this.roleLabels[item.role] || item.role}</span><span class="tag">${this.labelCategory(item.analysis.category)}</span><span class="tag">Громкость ${item.analysis.loudness}/10</span><span class="tag">Подавление ${item.analysis.suppressionRisk}/10</span></div></div>`).join('')}</div></div>
+      <div class="card" style="padding:14px;margin:0"><div class="section-title">Визуал забивки</div>${packingVisual}</div></div>
+      <div class="grid grid-2" style="margin-top:14px"><div class="card" style="padding:14px;margin:0"><div class="section-title">Архитектура микса</div><div class="kv">
+        <div class="kv-row"><div>Тело микса</div><div><strong>${this.escapeHtml(arch.suggestedBody || res.bodyName)}</strong></div></div>
+        <div class="kv-row"><div>Поддержка</div><div>${this.escapeHtml((arch.mainSupport || []).join(', ') || 'нет выраженной поддержки')}</div></div>
+        <div class="kv-row"><div>Связка / контраст</div><div>${this.escapeHtml([...(arch.bridges || []), ...(arch.refreshers || [])].join(', ') || 'не используется')}</div></div>
+        <div class="kv-row"><div>Акцент</div><div>${this.escapeHtml((arch.accents || []).join(', ') || 'нет яркого акцента')}</div></div>
+        <div class="kv-row"><div>Округлитель</div><div>${this.escapeHtml((arch.rounders || []).join(', ') || 'не нужен / отсутствует')}</div></div>
+        <div class="kv-row"><div>Охладитель</div><div>${this.escapeHtml((arch.coolers || []).join(', ') || 'нет')}</div></div>
+        <div class="kv-row"><div>Профиль</div><div>${this.escapeHtml(res.profileText || '')}</div></div></div></div>
+        <div class="card" style="padding:14px;margin:0"><div class="section-title">Почему микс работает</div><p class="text-sm">${this.escapeHtml(res.whyWorks || '')}</p><div class="notice" style="margin-top:10px">${this.escapeHtml(res.conceptComment || '')}</div></div></div>
+      <div class="grid grid-2" style="margin-top:14px"><div class="card" style="padding:14px;margin:0"><div class="section-title">Основные риски</div><div class="risk-list">${riskHtml}</div></div><div class="card" style="padding:14px;margin:0"><div class="section-title">Что исправить / рекомендации</div><div class="action-list">${actionHtml}</div></div></div>
+    </div>`;
+  };
+})();

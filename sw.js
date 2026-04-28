@@ -1,9 +1,9 @@
-const CACHE_NAME = "hookah-mixology-v24-packing-score-realfix";
+const CACHE_NAME = "hookah-mixology-v25-ui-scoring-polish";
 const APP_SHELL = [
   './',
   './index.html',
-  './app.js?v=24',
-  './manifest.webmanifest?v=24',
+  './app.js?v=25',
+  './manifest.webmanifest?v=25',
   './icons/icon-120-v5.png',
   './icons/icon-152-v5.png',
   './icons/icon-167-v5.png',
@@ -11,7 +11,7 @@ const APP_SHELL = [
   './icons/icon-192-v5.png',
   './icons/icon-512-v5.png',
   './icons/icon-1024-v5.png',
-  './assets/banner-v24.png',
+  './assets/banner-v25.png',
   './data/bundled_base.json'
 ];
 
