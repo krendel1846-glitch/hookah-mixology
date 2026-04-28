@@ -3341,12 +3341,6 @@ app.buildManualResults = function(selected, style, coolingLevel, fixedCompositio
   return this.rotateManualVariants(diversified.length ? diversified : unique, workingFlavors, desiredCount, style, coolingLevel, resultCount);
 };
 
-window.app = app;
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => window.app.init());
-} else {
-  window.app.init();
-}
 
 /* v19 full manual pipeline rewrite + packing visual */
 (function(){
@@ -3820,4 +3814,93 @@ if (document.readyState === 'loading') {
     oldInit();
     this.ensurePackingStyleControl();
   };
+})();
+
+/* v21 clean bootstrap and manual-result safety overrides */
+(function(){
+  app.roleLabels = Object.assign({}, app.roleLabels || {}, {
+    body: 'Тело / база',
+    core: 'Ядро / тело',
+    support: 'Поддержка',
+    support2: 'Поддержка 2',
+    enhancer: 'Усилитель',
+    bridge: 'Связка',
+    accent: 'Акцент',
+    rounder: 'Округлитель',
+    refresher: 'Освежитель',
+    cooler: 'Охладитель',
+    deepener: 'Углубитель',
+    softener: 'Смягчитель',
+    contrast: 'Контраст',
+    dessert_base: 'Десертная база',
+    acidic_correction: 'Кислая коррекция',
+    aromatic_touch: 'Ароматический штрих'
+  });
+
+  app.generate = function() {
+    const resultsArea = document.getElementById('results-area');
+    if (!this.state.flavors.length) {
+      if (resultsArea) resultsArea.innerHTML = '<div class="card notice">Сначала загрузи базу вкусов.</div>';
+      return;
+    }
+    const mode = document.getElementById('gen-mode').value;
+    const requestedCount = parseInt(document.getElementById('gen-count').value, 10);
+    const style = document.getElementById('gen-style').value;
+    const coolingLevel = document.getElementById('cooling-level').value;
+    const selectedResultCount = parseInt(document.getElementById('result-count').value, 10);
+    const resultCount = mode === 'manual' ? Math.max(3, selectedResultCount || 3) : (selectedResultCount || 3);
+    const fixedComposition = document.getElementById('fixed-composition').value === 'yes';
+    const selected = this.collectSelectedFlavors();
+
+    if (resultsArea) resultsArea.innerHTML = '<div class="card text-center">⏳ Строю разные концепции, роли, проценты и визуал забивки…</div>';
+    setTimeout(() => {
+      try {
+        let results = [];
+        if (mode === 'manual' && selected.length >= 2) {
+          const targetCount = Math.max(2, Math.min(requestedCount, selected.length));
+          results = this.buildManualResults(selected, style, coolingLevel, fixedComposition, false, targetCount, resultCount);
+        } else {
+          results = this.buildAutomaticResults(requestedCount, style, coolingLevel, resultCount);
+        }
+        if (!results.length) {
+          if (resultsArea) resultsArea.innerHTML = '<div class="card notice">Не удалось собрать хорошие варианты. Попробуй другой стиль, меньше вкусов или загрузи больше базы.</div>';
+          return;
+        }
+        this.renderResults(results.slice(0, resultCount), { mode, style, coolingLevel });
+        this.switchTab('results', document.querySelector('.nav-btn[data-tab="results"]'));
+      } catch (error) {
+        console.error('Generation failed:', error);
+        if (resultsArea) resultsArea.innerHTML = '<div class="card" style="border-color:var(--danger);color:var(--danger)">Ошибка генерации: ' + this.escapeHtml(error && error.message ? error.message : String(error)) + '</div>';
+        this.switchTab('results', document.querySelector('.nav-btn[data-tab="results"]'));
+      }
+    }, 50);
+  };
+
+  app.generateAlternatives = function() {
+    const selected = this.collectSelectedFlavors();
+    if (selected.length < 2) return alert('Для альтернатив выбери минимум 2 вкуса');
+    const style = document.getElementById('gen-style').value;
+    const coolingLevel = document.getElementById('cooling-level').value;
+    const fixedComposition = document.getElementById('fixed-composition').value === 'yes';
+    const requestedCount = parseInt(document.getElementById('gen-count').value, 10);
+    const selectedResultCount = parseInt(document.getElementById('result-count').value, 10);
+    const resultCount = Math.max(5, selectedResultCount || 5);
+    try {
+      const targetCount = Math.max(2, Math.min(requestedCount, selected.length));
+      const results = this.buildManualResults(selected, style, coolingLevel, fixedComposition, true, targetCount, resultCount);
+      this.renderResults(results, { mode:'manual', style, coolingLevel });
+      this.switchTab('results', document.querySelector('.nav-btn[data-tab="results"]'));
+    } catch (error) {
+      console.error('Alternative generation failed:', error);
+      document.getElementById('results-area').innerHTML = '<div class="card" style="border-color:var(--danger);color:var(--danger)">Ошибка генерации альтернатив: ' + this.escapeHtml(error && error.message ? error.message : String(error)) + '</div>';
+      this.switchTab('results', document.querySelector('.nav-btn[data-tab="results"]'));
+    }
+  };
+
+  window.app = app;
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => window.app.init());
+  } else {
+    window.app.init();
+  }
 })();

@@ -1,9 +1,9 @@
-const CACHE_NAME = "hookah-mixology-v20-index-rewrite";
+const CACHE_NAME = "hookah-mixology-v21-clean";
 const APP_SHELL = [
   './',
   './index.html',
-  './app.js?v=20',
-  './manifest.webmanifest?v=13',
+  './app.js?v=21',
+  './manifest.webmanifest?v=21',
   './icons/icon-120-v5.png',
   './icons/icon-152-v5.png',
   './icons/icon-167-v5.png',
@@ -17,7 +17,9 @@ const APP_SHELL = [
 
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)).catch(() => null)
+    caches.open(CACHE_NAME)
+      .then(cache => cache.addAll(APP_SHELL))
+      .catch(error => console.warn('Cache install skipped:', error))
   );
   self.skipWaiting();
 });
@@ -48,17 +50,14 @@ self.addEventListener('fetch', event => {
   }
 
   event.respondWith(
-    caches.match(req).then(cached => {
-      if (cached) return cached;
-      return fetch(req)
-        .then(response => {
-          if (response && response.status === 200) {
-            const copy = response.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(req, copy));
-          }
-          return response;
-        })
-        .catch(() => cached);
-    })
+    fetch(req)
+      .then(response => {
+        if (response && response.status === 200) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(req, copy));
+        }
+        return response;
+      })
+      .catch(() => caches.match(req))
   );
 });
