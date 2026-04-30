@@ -4613,3 +4613,6 @@ if (document.readyState === 'loading') {
 
 
 /* v32 mixology-engine split marker: generation entrypoints are installed by ./js/mixology-engine.js */
+
+
+/* v33 scoring-engine split marker: active scoring is installed by ./js/scoring-engine.js */

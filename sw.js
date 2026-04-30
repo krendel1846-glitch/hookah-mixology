@@ -1,11 +1,13 @@
-const CACHE_NAME = "hookah-mixology-v32-mixology-engine-split";
+const CACHE_NAME = "hookah-mixology-v33-scoring-engine-split";
 const APP_SHELL = [
   './',
   './index.html',
-  './app.js?v=32',
-  './js/mixology-engine.js?v=32',
-  './photo-search.js?v=32',
-  './manifest.webmanifest?v=32',
+  './app.js?v=33',
+  './js/mixology-engine.js?v=33',
+  './js/app-stats.js?v=33',
+  './js/scoring-engine.js?v=33',
+  './photo-search.js?v=33',
+  './manifest.webmanifest?v=33',
   './icons/icon-120-v5.png',
   './icons/icon-152-v5.png',
   './icons/icon-167-v5.png',
