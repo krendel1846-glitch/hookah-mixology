@@ -4991,3 +4991,360 @@ if (document.readyState === 'loading') {
     this.refreshPhotoResultsSummary(matches.length);
   };
 })();
+
+
+/* v29 OCR speed + accuracy:
+   - fewer OCR passes by default
+   - no random Burn results when OCR sees Strawberry / Overdose
+   - exact flavor tokens hard-filter weak candidates
+   - Overdose + Strawberry gets decisive priority
+*/
+(function(){
+  if (!window.app && typeof app !== 'undefined') window.app = app;
+  if (!window.app) return;
+  const app = window.app;
+
+  app.v29FlavorAliases = {
+    strawberry: ['strawberry','strawbery','straberry','strawberrv','strowberry','5trawberry','клубника','клубничный','клубничная','земляника'],
+    banana: ['banana','банан'],
+    apple: ['apple','яблоко','яблочный','яблочная'],
+    pear: ['pear','груша','грушевый'],
+    peach: ['peach','персик'],
+    kiwi: ['kiwi','киви'],
+    grape: ['grape','виноград'],
+    melon: ['melon','дыня'],
+    watermelon: ['watermelon','арбуз'],
+    lemon: ['lemon','лимон'],
+    lime: ['lime','лайм'],
+    orange: ['orange','апельсин'],
+    mango: ['mango','манго'],
+    coconut: ['coconut','кокос'],
+    cherry: ['cherry','вишня'],
+    blueberry: ['blueberry','голубика'],
+    raspberry: ['raspberry','малина'],
+    blackberry: ['blackberry','ежевика'],
+    currant: ['currant','смородина'],
+    mint: ['mint','мята'],
+    cola: ['cola','кола'],
+    cactus: ['cactus','кактус'],
+    guava: ['guava','гуава'],
+    feijoa: ['feijoa','фейхоа']
+  };
+
+  app.v29BrandAliases = {
+    overdose: ['overdose','over dose','overd0se','overdoze','overdos','overd','ovrdose','0verdose'],
+    blackburn: ['blackburn','black burn','blackbum','black bwm','blackbern'],
+    burn: ['burn'],
+    'must have': ['must have','musthave'],
+    darkside: ['darkside','dark side'],
+    starline: ['starline','star line'],
+    sebero: ['sebero','себеро']
+  };
+
+  app.normalizePhotoOCRTextV29 = function(raw) {
+    let text = String(raw || '').toLowerCase();
+    text = text
+      .replace(/[|!1]/g, 'i')
+      .replace(/[0]/g, 'o')
+      .replace(/[5]/g, 's')
+      .replace(/[@]/g, 'a')
+      .replace(/\bo\s*ver\s*dose\b/g, 'overdose')
+      .replace(/\bover\s*dose\b/g, 'overdose')
+      .replace(/\boverdo[sz]e?\b/g, 'overdose')
+      .replace(/\boverdose\b/g, 'overdose')
+      .replace(/\bstraw\s*berry\b/g, 'strawberry')
+      .replace(/\bstrawbery\b/g, 'strawberry')
+      .replace(/\bstraberry\b/g, 'strawberry')
+      .replace(/\bstrowberry\b/g, 'strawberry')
+      .replace(/\bstrawberrv\b/g, 'strawberry')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (this.normalizePhotoOCRTextV28) {
+      const v28 = this.normalizePhotoOCRTextV28(raw);
+      if (v28 && v28.length > text.length) text += ' ' + v28;
+    }
+    return text.replace(/\s+/g, ' ').trim();
+  };
+
+  app.getPhotoHintsV29 = function(sourceText) {
+    const text = this.normalizePhotoOCRTextV29(sourceText);
+    const compact = this.compactComparableText ? this.compactComparableText(text) : text.replace(/\s+/g,'');
+    const tokens = new Set((text.match(/[a-zа-яё0-9]+/gi) || []).map(t => t.toLowerCase()).filter(t => t.length >= 3));
+    const brands = [];
+    Object.entries(this.v29BrandAliases).forEach(([brand, aliases]) => {
+      const hit = aliases.some(alias => {
+        const a = String(alias).toLowerCase();
+        const ac = a.replace(/\s+/g,'');
+        return tokens.has(a) || compact.includes(ac);
+      });
+      if (hit) brands.push(brand);
+    });
+
+    const flavorTokens = [];
+    Object.entries(this.v29FlavorAliases).forEach(([canonical, aliases]) => {
+      const hit = aliases.some(alias => {
+        const a = String(alias).toLowerCase();
+        const ac = a.replace(/\s+/g,'');
+        return tokens.has(a) || compact.includes(ac);
+      });
+      if (hit) flavorTokens.push(canonical);
+    });
+
+    return { text, compact, tokens, brands, flavorTokens };
+  };
+
+  app.flavorHasCanonicalTokenV29 = function(flavor, canonical) {
+    const aliases = this.v29FlavorAliases[canonical] || [canonical];
+    const label = this.normalizePhotoOCRTextV29([flavor && flavor.name, flavor && flavor.description, flavor && flavor.type].join(' '));
+    const compact = this.compactComparableText ? this.compactComparableText(label) : label.replace(/\s+/g,'');
+    return aliases.some(alias => {
+      const a = String(alias).toLowerCase();
+      const ac = a.replace(/\s+/g,'');
+      return label.split(/[^a-zа-яё0-9]+/i).includes(a) || compact.includes(ac);
+    });
+  };
+
+  app.brandCanonicalV29 = function(brand) {
+    const b = this.normalizePhotoOCRTextV29(brand);
+    if (b.includes('overdose')) return 'overdose';
+    if (b.includes('blackburn')) return 'blackburn';
+    if (b === 'burn' || b.includes(' burn')) return 'burn';
+    if (b.includes('must')) return 'must have';
+    if (b.includes('darkside')) return 'darkside';
+    if (b.includes('starline')) return 'starline';
+    if (b.includes('sebero')) return 'sebero';
+    return b;
+  };
+
+  app.scorePhotoFlavorMatch = function(flavor, sourceText, brandContext = null) {
+    const hints = this.getPhotoHintsV29(sourceText);
+    const flavorBrand = this.brandCanonicalV29(flavor.brand || '');
+    const name = String(flavor.name || '').split('/')[0].trim();
+    const nameNorm = this.normalizePhotoOCRTextV29(name);
+    const nameCompact = this.compactComparableText ? this.compactComparableText(nameNorm) : nameNorm.replace(/\s+/g,'');
+    const fullNorm = this.normalizePhotoOCRTextV29(`${flavor.brand || ''} ${flavor.name || ''} ${flavor.description || ''} ${flavor.type || ''}`);
+    const fullCompact = this.compactComparableText ? this.compactComparableText(fullNorm) : fullNorm.replace(/\s+/g,'');
+
+    let score = 0;
+    const reasons = [];
+
+    const brandHit = hints.brands.includes(flavorBrand);
+    if (brandHit) {
+      score += flavorBrand === 'overdose' ? 900 : 520;
+      reasons.push('совпал бренд');
+    }
+
+    // Exact name/label match.
+    if (nameCompact.length >= 4 && hints.compact.includes(nameCompact)) {
+      score += 950;
+      reasons.push('название вкуса найдено напрямую');
+    }
+
+    let canonicalHits = 0;
+    hints.flavorTokens.forEach(token => {
+      if (this.flavorHasCanonicalTokenV29(flavor, token)) {
+        canonicalHits += 1;
+        score += token === 'strawberry' ? 620 : 430;
+      }
+    });
+    if (canonicalHits) reasons.push(`точных вкусовых слов: ${canonicalHits}/${hints.flavorTokens.length}`);
+
+    // Decisive case for Overdose Strawberry photo.
+    if (hints.brands.includes('overdose') && hints.flavorTokens.includes('strawberry')) {
+      if (flavorBrand === 'overdose' && this.flavorHasCanonicalTokenV29(flavor, 'strawberry')) {
+        score += nameNorm === 'strawberry' ? 1400 : 850;
+        reasons.push('Overdose + Strawberry');
+      } else {
+        score -= 700;
+      }
+    }
+
+    // If OCR sees Strawberry, non-strawberry candidates must fall down hard.
+    if (hints.flavorTokens.includes('strawberry') && !this.flavorHasCanonicalTokenV29(flavor, 'strawberry')) {
+      score -= 1200;
+      reasons.push('нет Strawberry в названии');
+    }
+
+    // If a strong flavor token exists, completely unrelated tastes must not outrank.
+    if (hints.flavorTokens.length && canonicalHits === 0) {
+      score -= 800;
+    }
+
+    // Exact simple flavor names beat compound strawberry variants.
+    if (hints.flavorTokens.length === 1 && hints.flavorTokens[0] === 'strawberry' && this.flavorHasCanonicalTokenV29(flavor, 'strawberry')) {
+      const flavorNameTokens = (nameNorm.match(/[a-zа-яё0-9]+/gi) || []).filter(t => t.length >= 3);
+      if (flavorNameTokens.length === 1) score += 360;
+      else score -= Math.min(260, (flavorNameTokens.length - 1) * 85);
+    }
+
+    // Short false brand protection: Burn must not win unless Burn itself is clearly detected and flavor matches.
+    if (flavorBrand === 'burn' && !hints.brands.includes('burn')) score -= 260;
+    if (flavorBrand === 'blackburn' && !hints.brands.includes('blackburn')) score -= 180;
+
+    // Soft fuzzy fallback only after hard token logic.
+    if (!hints.flavorTokens.length && typeof this.similarityScore === 'function') {
+      const sim = Math.max(
+        this.similarityScore(hints.text, nameNorm),
+        this.similarityScore(hints.compact, nameCompact)
+      );
+      if (sim > 0.72) {
+        score += Math.round(sim * 240);
+        reasons.push('вкус похож по OCR');
+      }
+    }
+
+    score = Math.round(score);
+    return { score, reasons: Array.from(new Set(reasons)).slice(0, 4) };
+  };
+
+  app.findPhotoMatches = function(sourceText, limit = 10) {
+    const hints = this.getPhotoHintsV29(sourceText);
+    if (!hints.text || hints.text.length < 2) return [];
+
+    let candidateFlavors = this.state.flavors.slice();
+
+    // Restrict only with strong long brand. Do not restrict to Burn from noise.
+    if (hints.brands.includes('overdose')) {
+      candidateFlavors = candidateFlavors.filter(f => this.brandCanonicalV29(f.brand) === 'overdose');
+    } else if (hints.brands.includes('must have')) {
+      candidateFlavors = candidateFlavors.filter(f => this.brandCanonicalV29(f.brand) === 'must have');
+    } else if (hints.brands.includes('darkside')) {
+      candidateFlavors = candidateFlavors.filter(f => this.brandCanonicalV29(f.brand) === 'darkside');
+    }
+
+    // Strong flavor-token filter: if OCR sees Strawberry, candidate must include Strawberry.
+    if (hints.flavorTokens.length) {
+      const filtered = candidateFlavors.filter(f => hints.flavorTokens.some(token => this.flavorHasCanonicalTokenV29(f, token)));
+      if (filtered.length) candidateFlavors = filtered;
+    }
+
+    let results = candidateFlavors.map(flavor => {
+      const match = this.scorePhotoFlavorMatch(flavor, hints.text, null);
+      let confidence = this.clampInt ? this.clampInt(Math.round(match.score / 24), 0, 99) : Math.max(0, Math.min(99, Math.round(match.score / 24)));
+      return { flavor, score: match.score, reasons: match.reasons, confidence, lockedBrand: hints.brands.length ? { brand: hints.brands[0] } : null };
+    })
+    .filter(item => item.score >= 140)
+    .sort((a, b) => b.score - a.score || this.getFlavorLabel(a.flavor).localeCompare(this.getFlavorLabel(b.flavor), 'ru'))
+    .slice(0, limit);
+
+    // Hard fallback for the common case: OCR contains Strawberry but ranking still misses exact Strawberry.
+    if (hints.flavorTokens.includes('strawberry')) {
+      const exact = this.state.flavors.find(f =>
+        this.brandCanonicalV29(f.brand) === 'overdose' &&
+        this.normalizePhotoOCRTextV29(String(f.name || '').split('/')[0].trim()) === 'strawberry'
+      );
+      if (exact && (!results.length || !results.some(r => r.flavor.id === exact.id))) {
+        results.unshift({
+          flavor: exact,
+          score: hints.brands.includes('overdose') ? 3600 : 1900,
+          confidence: hints.brands.includes('overdose') ? 96 : 78,
+          reasons: hints.brands.includes('overdose') ? ['совпал бренд', 'Overdose + Strawberry', 'точное название вкуса'] : ['точное название вкуса', 'найдено Strawberry'],
+          lockedBrand: hints.brands.length ? { brand: hints.brands[0] } : null
+        });
+        results = results.slice(0, limit);
+      }
+    }
+
+    return results;
+  };
+
+  app.extractPhotoTexts = async function(imgEl) {
+    if (typeof Tesseract === 'undefined') {
+      await this.ensureExternalLib('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js', 'Tesseract');
+    }
+
+    // Fast mode: 1 focused pass + optional fallback pass only if no strong token.
+    const tasks = [
+      { key: 'gray', label: 'Быстрый центр этикетки', crop: 'label', lang: 'eng' },
+      { key: 'bw', label: 'Контрастный центр', crop: 'label', lang: 'eng+rus', fallback: true }
+    ];
+
+    const previews = [];
+    const textBlocks = [];
+    let bestConfidence = 0;
+
+    for (let idx = 0; idx < tasks.length; idx++) {
+      const task = tasks[idx];
+
+      // Skip fallback if first pass already found useful tokens.
+      if (task.fallback) {
+        const hints = this.getPhotoHintsV29(textBlocks.join('\n'));
+        if (hints.brands.length || hints.flavorTokens.length) break;
+      }
+
+      const canvas = this.preprocessPhotoToCanvas(imgEl, task.key, task.crop);
+      previews.push({ label: task.label, dataUrl: canvas.toDataURL('image/png') });
+      this.renderPhotoPassPreviews(previews);
+      this.updatePhotoStatus(`OCR: ${task.label}…`, 'info');
+
+      const result = await Tesseract.recognize(canvas, task.lang, {
+        tessedit_pageseg_mode: '11',
+        tessedit_ocr_engine_mode: '1',
+        preserve_interword_spaces: '1',
+        user_defined_dpi: '300',
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя -/()',
+        logger: (message) => {
+          if (message.status === 'recognizing text') {
+            const pct = Math.round((message.progress || 0) * 100);
+            this.updatePhotoStatus(`OCR: ${task.label} — ${pct}%`, 'info');
+          }
+        }
+      });
+
+      const rawText = String(result && result.data && result.data.text ? result.data.text : '').trim();
+      const confidence = Number(result && result.data && result.data.confidence ? result.data.confidence : 0) || 0;
+      bestConfidence = Math.max(bestConfidence, confidence);
+      const normalized = this.normalizePhotoOCRTextV29(rawText);
+      if (rawText) textBlocks.push(rawText);
+      if (normalized && normalized !== rawText) textBlocks.push(normalized);
+
+      const quick = this.findPhotoMatches(textBlocks.join('\n'), 3);
+      if (quick.length && quick[0].confidence >= 78) break;
+    }
+
+    const merged = Array.from(new Set(textBlocks.join('\n').split(/\n+/).map(v => v.trim()).filter(Boolean))).join('\n');
+    return { text: merged, previews, confidence: bestConfidence, lockedBrand: null };
+  };
+
+  app.renderPhotoMatches = function(matches, sourceText) {
+    const container = document.getElementById('photo-results');
+    if (!container) return;
+    if (!matches.length) {
+      container.innerHTML = '<div class="photo-empty">Совпадений не найдено. Попробуй фото этикетки крупнее или вручную введи бренд и вкус, например: Overdose Strawberry.</div>';
+      this.refreshPhotoResultsSummary(0);
+      return;
+    }
+
+    const hints = this.getPhotoHintsV29(sourceText);
+    const queryText = this.escapeHtml(sourceText || '');
+    const hintLine = `<div class="notice" style="margin-bottom:12px">
+      Распознано: ${hints.brands.length ? `бренд <strong>${this.escapeHtml(hints.brands.join(', '))}</strong>` : 'бренд не зафиксирован'}${hints.flavorTokens.length ? ` · вкус <strong>${this.escapeHtml(hints.flavorTokens.join(', '))}</strong>` : ''}. 
+      ${hints.flavorTokens.length ? 'Нерелевантные вкусы отсечены.' : 'Если OCR слабый, введи бренд/вкус вручную.'}
+    </div>`;
+
+    container.innerHTML = hintLine + matches.map((item, index) => `
+      <div class="photo-match-card ${index === 0 ? 'best' : ''}">
+        <div class="photo-match-top">
+          <div>
+            <div class="mix-title" style="font-size:1.02rem;line-height:1.3">${this.escapeHtml(item.flavor.brand)} ${this.escapeHtml(item.flavor.name)}</div>
+            <p class="text-sm" style="margin-top:6px">${this.escapeHtml(item.flavor.description || 'Без дополнительного описания')}</p>
+          </div>
+          <div class="text-right">
+            <div class="photo-match-score">${item.confidence}%</div>
+            <div class="text-xs muted">уверенность поиска</div>
+          </div>
+        </div>
+        <div class="photo-match-reasons">
+          ${item.reasons.map(reason => `<span class="badge badge-neutral">${this.escapeHtml(reason)}</span>`).join('')}
+          ${item.flavor.type ? `<span class="badge badge-primary">${this.escapeHtml(item.flavor.type)}</span>` : ''}
+          ${item.flavor.strength ? `<span class="badge badge-warning">${this.escapeHtml(item.flavor.strength)}</span>` : ''}
+        </div>
+        <div class="footer-note" style="margin-top:10px">OCR-текст: ${queryText}</div>
+        <div class="photo-actions" style="margin-top:12px">
+          <button type="button" class="btn btn-primary btn-sm" onclick="app.addPhotoMatchToGenerator('${String(item.flavor.id).replace(/'/g, "\\'")}')">Это он — добавить в выбор вкусов</button>
+        </div>
+      </div>
+    `).join('');
+    this.refreshPhotoResultsSummary(matches.length);
+  };
+})();

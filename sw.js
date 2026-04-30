@@ -1,9 +1,9 @@
-const CACHE_NAME = "hookah-mixology-v28-ocr-photo-search-fix";
+const CACHE_NAME = "hookah-mixology-v29-ocr-speed-accuracy";
 const APP_SHELL = [
   './',
   './index.html',
-  './app.js?v=28',
-  './manifest.webmanifest?v=28',
+  './app.js?v=29',
+  './manifest.webmanifest?v=29',
   './icons/icon-120-v5.png',
   './icons/icon-152-v5.png',
   './icons/icon-167-v5.png',
