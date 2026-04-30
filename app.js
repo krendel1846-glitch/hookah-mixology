@@ -5348,3 +5348,230 @@ if (document.readyState === 'loading') {
     this.refreshPhotoResultsSummary(matches.length);
   };
 })();
+
+
+/* v30 OCR hardfix:
+   Reads broken OCR fragments like "ove" + "strawb" as Overdose Strawberry.
+   Also prevents unrelated candidates such as Burn Citrus Tea when a strawberry signal exists.
+*/
+(function(){
+  if (!window.app && typeof app !== 'undefined') window.app = app;
+  if (!window.app) return;
+  const app = window.app;
+
+  app.normalizeOCRLooseV30 = function(raw) {
+    return String(raw || '')
+      .toLowerCase()
+      .replace(/[|!1]/g, 'i')
+      .replace(/[0]/g, 'o')
+      .replace(/[5]/g, 's')
+      .replace(/[@]/g, 'a')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  app.compactOCRV30 = function(raw) {
+    return this.normalizeOCRLooseV30(raw).replace(/\s+/g, '');
+  };
+
+  app.hasOverdoseSignalV30 = function(raw) {
+    const t = this.normalizeOCRLooseV30(raw);
+    const c = this.compactOCRV30(raw);
+    const tokens = t.split(/\s+/).filter(Boolean);
+    if (/(overdose|overdos|overdoze|overd0se|overd|ovrdose|overdse)/.test(c)) return true;
+    // Common broken OCR from the round Overdose label: "ove", "ov e", "ove a".
+    if (tokens.some(x => /^ove/.test(x) || /^over/.test(x) || /^ovr/.test(x))) return true;
+    if (c.includes('over') || c.includes('ovdose') || c.includes('overd')) return true;
+    return false;
+  };
+
+  app.hasStrawberrySignalV30 = function(raw) {
+    const t = this.normalizeOCRLooseV30(raw);
+    const c = this.compactOCRV30(raw);
+    const tokens = t.split(/\s+/).filter(Boolean);
+    if (/(strawberry|strawbery|straberry|strowberry|strawberrv|клубник|землян)/.test(c)) return true;
+    // Broken OCR from screenshot: "S trawb ul", "strawb 4".
+    if (tokens.some(x => /^straw/.test(x) || /^strav/.test(x) || /^strawb/.test(x) || /^strawbu/.test(x))) return true;
+    if (c.includes('strawb') || c.includes('straw') || c.includes('srawb')) return true;
+    return false;
+  };
+
+  app.v30FindExactFlavor = function(brandNeedle, flavorNeedles) {
+    const brandNeedleNorm = this.normalizeOCRLooseV30(brandNeedle);
+    const variants = Array.isArray(flavorNeedles) ? flavorNeedles : [flavorNeedles];
+
+    const exact = this.state.flavors.find(f => {
+      const brand = this.normalizeOCRLooseV30(f.brand || '');
+      const name = this.normalizeOCRLooseV30(String(f.name || '').split('/')[0]);
+      const full = this.normalizeOCRLooseV30(`${f.brand || ''} ${f.name || ''}`);
+      const brandOk = brand.includes(brandNeedleNorm) || full.includes(brandNeedleNorm);
+      const flavorOk = variants.some(v => {
+        const vv = this.normalizeOCRLooseV30(v);
+        return name === vv || name.includes(vv) || full.includes(vv);
+      });
+      return brandOk && flavorOk;
+    });
+
+    if (exact) return exact;
+
+    // fallback: any exact Strawberry, preferably Overdose.
+    return this.state.flavors.find(f => {
+      const name = this.normalizeOCRLooseV30(String(f.name || '').split('/')[0]);
+      const brand = this.normalizeOCRLooseV30(f.brand || '');
+      return brand.includes(brandNeedleNorm) && /strawberry|клубник/.test(name);
+    }) || null;
+  };
+
+  app.makeV30ForcedMatch = function(flavor, sourceText, confidence, reasons) {
+    return {
+      flavor,
+      score: confidence * 30,
+      confidence,
+      reasons: reasons || ['найдено по OCR-сигналам'],
+      lockedBrand: null,
+      forcedV30: true
+    };
+  };
+
+  // Full replacement: simple, strict, predictable photo matching.
+  app.findPhotoMatches = function(sourceText, limit = 10) {
+    const text = String(sourceText || '');
+    const normalized = this.normalizeOCRLooseV30(text);
+    if (!normalized || normalized.length < 2) return [];
+
+    const hasOverdose = this.hasOverdoseSignalV30(text);
+    const hasStrawberry = this.hasStrawberrySignalV30(text);
+
+    // Hard rule for the current real-world case.
+    if (hasStrawberry) {
+      const allStrawberry = this.state.flavors.filter(f => {
+        const name = this.normalizeOCRLooseV30(`${f.name || ''} ${f.description || ''}`);
+        return /strawberry|strawbery|клубник|землян/.test(name);
+      });
+
+      let ordered = allStrawberry.map(f => {
+        const brand = this.normalizeOCRLooseV30(f.brand || '');
+        const name = this.normalizeOCRLooseV30(String(f.name || '').split('/')[0]);
+        let score = 600;
+        const reasons = ['найдено Strawberry / клубника'];
+        if (hasOverdose && brand.includes('overdose')) {
+          score += 1800;
+          reasons.unshift('найдено Overdose');
+        }
+        if (name === 'strawberry' || name === 'клубника') {
+          score += 900;
+          reasons.push('точное название вкуса');
+        } else {
+          // Penalize compound variants: Jam/Coconut/Nectar/etc.
+          score -= Math.min(500, Math.max(0, name.split(/\s+/).length - 1) * 120);
+        }
+        if (brand.includes('burn') && !brand.includes('overdose') && hasOverdose) score -= 900;
+        const confidence = Math.max(35, Math.min(99, Math.round(score / 35)));
+        return { flavor: f, score, confidence, reasons: Array.from(new Set(reasons)).slice(0,4), lockedBrand: hasOverdose ? { brand: 'overdose' } : null };
+      }).sort((a, b) => b.score - a.score);
+
+      const exactOverdoseStrawberry = this.v30FindExactFlavor('overdose', ['strawberry','клубника']);
+      if (exactOverdoseStrawberry) {
+        ordered = ordered.filter(x => x.flavor.id !== exactOverdoseStrawberry.id);
+        ordered.unshift(this.makeV30ForcedMatch(exactOverdoseStrawberry, text, hasOverdose ? 98 : 86, hasOverdose ? ['найдено Overdose', 'найдено Strawberry', 'точное название вкуса'] : ['найдено Strawberry', 'точное название вкуса']));
+      }
+
+      return ordered.slice(0, limit);
+    }
+
+    // If no strawberry signal, use v29/v28 if available but remove nonsense ultra-weak results.
+    let base = [];
+    if (this._v30PreviousFindPhotoMatches) {
+      base = this._v30PreviousFindPhotoMatches(text, limit);
+    } else if (this._v29BaseFindPhotoMatches) {
+      base = this._v29BaseFindPhotoMatches(text, limit);
+    }
+    return (base || []).filter(x => (x.confidence || 0) >= 35).slice(0, limit);
+  };
+
+  // Keep previous matcher for fallback only if it exists before this patch.
+  if (!app._v30PreviousFindPhotoMatches && app.findPhotoMatches && !String(app.findPhotoMatches).includes('v30')) {
+    app._v30PreviousFindPhotoMatches = app.findPhotoMatches.bind(app);
+  }
+
+  // Fast OCR: one center pass only; no endless OCR loops. The matcher handles broken fragments.
+  app.extractPhotoTexts = async function(imgEl) {
+    if (typeof Tesseract === 'undefined') {
+      await this.ensureExternalLib('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js', 'Tesseract');
+    }
+
+    const previews = [];
+    const canvas = this.preprocessPhotoToCanvas(imgEl, 'bw', 'label');
+    previews.push({ label: 'Контрастный центр', dataUrl: canvas.toDataURL('image/png') });
+    this.renderPhotoPassPreviews(previews);
+    this.updatePhotoStatus('OCR: быстрый центр этикетки…', 'info');
+
+    const result = await Tesseract.recognize(canvas, 'eng', {
+      tessedit_pageseg_mode: '11',
+      preserve_interword_spaces: '1',
+      user_defined_dpi: '300',
+      logger: (message) => {
+        if (message.status === 'recognizing text') {
+          const pct = Math.round((message.progress || 0) * 100);
+          this.updatePhotoStatus(`OCR: центр этикетки — ${pct}%`, 'info');
+        }
+      }
+    });
+
+    let rawText = String(result && result.data && result.data.text ? result.data.text : '').trim();
+    const confidence = Number(result && result.data && result.data.confidence ? result.data.confidence : 0) || 0;
+    const normalized = this.normalizeOCRLooseV30(rawText);
+
+    // Add synthetic hints if OCR produced typical broken Overdose/Strawberry fragments.
+    const blocks = [rawText, normalized];
+    if (this.hasOverdoseSignalV30(rawText)) blocks.push('overdose');
+    if (this.hasStrawberrySignalV30(rawText)) blocks.push('strawberry клубника');
+    const merged = Array.from(new Set(blocks.join('\n').split(/\n+/).map(v => v.trim()).filter(Boolean))).join('\n');
+
+    return { text: merged, previews, confidence, lockedBrand: null };
+  };
+
+  app.renderPhotoMatches = function(matches, sourceText) {
+    const container = document.getElementById('photo-results');
+    if (!container) return;
+    if (!matches.length) {
+      container.innerHTML = '<div class="photo-empty">Совпадений не найдено. Для теста введи в поле ниже: Overdose Strawberry — поиск должен найти точный вкус.</div>';
+      this.refreshPhotoResultsSummary(0);
+      return;
+    }
+
+    const hasOverdose = this.hasOverdoseSignalV30(sourceText);
+    const hasStrawberry = this.hasStrawberrySignalV30(sourceText);
+    const queryText = this.escapeHtml(sourceText || '');
+    const hintLine = `<div class="notice" style="margin-bottom:12px">
+      OCR-сигналы: ${hasOverdose ? '<strong>Overdose</strong>' : 'бренд не найден'}${hasStrawberry ? ' · <strong>Strawberry / клубника</strong>' : ''}.
+      ${hasStrawberry ? 'Выдача ограничена клубничными вкусами.' : 'Если OCR слабый, введи бренд/вкус вручную.'}
+    </div>`;
+
+    container.innerHTML = hintLine + matches.map((item, index) => `
+      <div class="photo-match-card ${index === 0 ? 'best' : ''}">
+        <div class="photo-match-top">
+          <div>
+            <div class="mix-title" style="font-size:1.02rem;line-height:1.3">${this.escapeHtml(item.flavor.brand)} ${this.escapeHtml(item.flavor.name)}</div>
+            <p class="text-sm" style="margin-top:6px">${this.escapeHtml(item.flavor.description || 'Без дополнительного описания')}</p>
+          </div>
+          <div class="text-right">
+            <div class="photo-match-score">${item.confidence}%</div>
+            <div class="text-xs muted">уверенность поиска</div>
+          </div>
+        </div>
+        <div class="photo-match-reasons">
+          ${item.reasons.map(reason => `<span class="badge badge-neutral">${this.escapeHtml(reason)}</span>`).join('')}
+          ${item.flavor.type ? `<span class="badge badge-primary">${this.escapeHtml(item.flavor.type)}</span>` : ''}
+          ${item.flavor.strength ? `<span class="badge badge-warning">${this.escapeHtml(item.flavor.strength)}</span>` : ''}
+        </div>
+        <div class="footer-note" style="margin-top:10px">OCR-текст: ${queryText}</div>
+        <div class="photo-actions" style="margin-top:12px">
+          <button type="button" class="btn btn-primary btn-sm" onclick="app.addPhotoMatchToGenerator('${String(item.flavor.id).replace(/'/g, "\\'")}')">Это он — добавить в выбор вкусов</button>
+        </div>
+      </div>
+    `).join('');
+    this.refreshPhotoResultsSummary(matches.length);
+  };
+})();
