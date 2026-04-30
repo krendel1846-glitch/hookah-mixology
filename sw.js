@@ -1,9 +1,9 @@
-const CACHE_NAME = "hookah-mixology-v25-ui-scoring-polish";
+const CACHE_NAME = "hookah-mixology-v26-ui-scoring-polish";
 const APP_SHELL = [
   './',
   './index.html',
-  './app.js?v=25',
-  './manifest.webmanifest?v=25',
+  './app.js?v=26',
+  './manifest.webmanifest?v=26',
   './icons/icon-120-v5.png',
   './icons/icon-152-v5.png',
   './icons/icon-167-v5.png',

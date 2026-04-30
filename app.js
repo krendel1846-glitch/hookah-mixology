@@ -4279,3 +4279,66 @@ if (document.readyState === 'loading') {
     </div>`;
   };
 })();
+
+
+/* v26 final UI polish: premium navigation pulse + cleaner result badges */
+(function(){
+  if (!window.app && typeof app !== 'undefined') window.app = app;
+  if (!window.app) return;
+  const app = window.app;
+
+  app.initPremiumNavV26 = function() {
+    document.querySelectorAll('.premium-nav-btn').forEach(btn => {
+      if (btn.dataset.v26Bound === '1') return;
+      btn.dataset.v26Bound = '1';
+      btn.addEventListener('click', function(){
+        this.classList.remove('is-pulsing');
+        void this.offsetWidth;
+        this.classList.add('is-pulsing');
+        clearTimeout(this._pulseTimer);
+        this._pulseTimer = setTimeout(() => this.classList.remove('is-pulsing'), 820);
+      });
+    });
+    const activeBtn = document.querySelector('.premium-nav-btn.active, .premium-nav-btn.is-active');
+    if (activeBtn) activeBtn.classList.add('is-active');
+  };
+
+  if (!app._v26BaseSwitchTab && typeof app.switchTab === 'function') {
+    app._v26BaseSwitchTab = app.switchTab.bind(app);
+    app.switchTab = function(tab, btn) {
+      const result = this._v26BaseSwitchTab(tab, btn);
+      document.querySelectorAll('.premium-nav-btn').forEach(el => {
+        el.classList.toggle('is-active', el.classList.contains('active'));
+      });
+      if (btn) btn.classList.add('is-active');
+      return result;
+    };
+  }
+
+  app.getResultBadgeMetaV26 = function(res) {
+    const conceptKey = res && (res._historyConceptKey || res.mixConcept || res.styleVariant || 'balanced');
+    const conceptName = this.conceptLabelRuV25 ? this.conceptLabelRuV25(conceptKey) : String(res && (res.mixConcept || res.styleVariant) || 'Вариант');
+    const ratioName = String(res && res.ratioName || '').trim();
+    const ratioFallback = Array.isArray(res && res.items) && res.items.length ? `${res.items.map(item => Number(item.percent || 0)).join('/')} Схема` : 'Композиция';
+    return { conceptName, ratioText: ratioName || ratioFallback };
+  };
+
+  if (!app._v26BaseRenderResultCard && typeof app.renderResultCard === 'function') {
+    app._v26BaseRenderResultCard = app.renderResultCard.bind(app);
+    app.renderResultCard = function(res, idx) {
+      const html = this._v26BaseRenderResultCard(res, idx);
+      const badgeMeta = this.getResultBadgeMetaV26(res);
+      const concept = this.escapeHtml(badgeMeta.conceptName);
+      const ratio = this.escapeHtml(badgeMeta.ratioText);
+      return html
+        .replace(/<span class="badge badge-neutral">.*?<\/span>\s*<span class="badge badge-info">.*?<\/span>/, `<span class="badge badge-neutral">${ratio}</span><span class="badge badge-info">${concept}</span>`)
+        .replace(/ЖАР ↓/g, 'Жар сверху ↓');
+    };
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => app.initPremiumNavV26());
+  } else {
+    app.initPremiumNavV26();
+  }
+})();
