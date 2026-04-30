@@ -4610,3 +4610,384 @@ if (document.readyState === 'loading') {
     };
   }
 })();
+
+
+/* v28 OCR photo search calibration:
+   - do not restrict to weak/false brand guesses
+   - exact flavor token beats random strawberry variants
+   - short brands like Burn are no longer allowed to lock search by noisy OCR
+   - fixes "add to selection" button from photo results
+*/
+(function(){
+  if (!window.app && typeof app !== 'undefined') window.app = app;
+  if (!window.app) return;
+  const app = window.app;
+
+  app.photoStopTokensV28 = new Set([
+    'табак','кальян','для','кал','аромат','aroma','flavor','flavour','with','the','and','for','tobacco',
+    'warning','made','product','image','photo','jpg','jpeg','png','cme','will','your','token','pre','ert',
+    'one','two','three','not','blackburn','burn','overdose','must','have','darkside','starline','sebero'
+  ]);
+
+  app.photoStrongFlavorTokensV28 = new Set([
+    'strawberry','клубника','клубничный','клубничная','banana','банан','apple','яблоко','pear','груша',
+    'peach','персик','kiwi','киви','grape','виноград','melon','дыня','арбуз','watermelon','lemon','лимон',
+    'lime','лайм','orange','апельсин','mango','манго','coconut','кокос','cherry','вишня','berry','ягода',
+    'blueberry','голубика','raspberry','малина','blackberry','ежевика','currant','смородина','mint','мята',
+    'cola','кола','cactus','кактус','guava','гуава','feijoa','фейхоа','vanilla','ваниль','nutella','cinnamon',
+    'candy','леденец','леденцы','леденцов','sorbet','сорбет','jam','джем','nectar','нектар'
+  ]);
+
+  app.normalizePhotoOCRTextV28 = function(rawText) {
+    let text = this.normalizePhotoOCRText ? this.normalizePhotoOCRText(rawText) : this.normalizeComparableText(rawText);
+    text = text
+      .replace(/\bo[\s\-_]*ver[\s\-_]*dose\b/g, 'overdose')
+      .replace(/\b0[\s\-_]*ver[\s\-_]*dose\b/g, 'overdose')
+      .replace(/\boverdo[sc]e\b/g, 'overdose')
+      .replace(/\boverd[0o]se\b/g, 'overdose')
+      .replace(/\bov[e3]rd[o0]s[e3]\b/g, 'overdose')
+      .replace(/\bstr[a-z]{0,3}berry\b/g, 'strawberry')
+      .replace(/\bstrawbery\b/g, 'strawberry')
+      .replace(/\bstraberry\b/g, 'strawberry')
+      .replace(/\bstrawberrv\b/g, 'strawberry')
+      .replace(/\bstrowberry\b/g, 'strawberry')
+      .replace(/\b5trawberry\b/g, 'strawberry')
+      .replace(/\bblack\s*bum\b/g, 'blackburn')
+      .replace(/\bblack\s*bwm\b/g, 'blackburn')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text;
+  };
+
+  app.photoTokensV28 = function(text) {
+    const norm = this.normalizePhotoOCRTextV28(text);
+    return Array.from(new Set(norm
+      .split(/[^a-zа-яё0-9]+/i)
+      .map(t => t.trim().toLowerCase())
+      .filter(t => t.length >= 3)
+      .filter(t => !/^[il1|]+$/.test(t))
+      .filter(t => !this.photoStopTokensV28.has(t))));
+  };
+
+  app.getPurePhotoFlavorNameV28 = function(flavor) {
+    const brand = this.normalizePhotoOCRTextV28(flavor && flavor.brand || '');
+    let name = String(flavor && flavor.name || '').split('/')[0].trim();
+    name = this.normalizePhotoOCRTextV28(name);
+    const brandTokens = new Set(this.photoTokensV28(brand));
+    const tokens = this.photoTokensV28(name).filter(t => !brandTokens.has(t));
+    return {
+      raw: name,
+      compact: this.compactComparableText(name),
+      tokens,
+      brand,
+      brandCompact: this.compactComparableText(brand),
+      brandTokens: this.photoTokensV28(brand)
+    };
+  };
+
+  app.hasExactWordV28 = function(tokens, token) {
+    return tokens.includes(String(token || '').toLowerCase());
+  };
+
+  app.scoreBrandCandidateV28 = function(entry, sourceText) {
+    const textNorm = this.normalizePhotoOCRTextV28(sourceText);
+    const textCompact = this.compactComparableText(textNorm);
+    const textTokens = this.photoTokensV28(textNorm);
+    const compact = this.compactComparableText(entry.compact || entry.norm || entry.brand);
+    const brandTokens = (entry.tokens && entry.tokens.length ? entry.tokens : this.photoTokensV28(entry.brand || entry.norm)).filter(t => t.length >= 3);
+    let score = 0;
+    if (!textCompact || !compact) return 0;
+
+    const isShortBrand = compact.length <= 4;
+    if (textCompact.includes(compact) && (!isShortBrand || textTokens.includes(compact))) {
+      score += isShortBrand ? 180 : 320;
+    }
+
+    (entry.aliases || []).forEach(alias => {
+      const aliasCompact = this.compactComparableText(alias);
+      if (aliasCompact && textCompact.includes(aliasCompact)) score += aliasCompact.length <= 4 ? 150 : 280;
+    });
+
+    const tokenHits = brandTokens.filter(token => textTokens.includes(token)).length;
+    score += tokenHits * (isShortBrand ? 40 : 90);
+
+    if (!isShortBrand) {
+      score += Math.round(this.similarityScore(textNorm, entry.norm || entry.brand) * 70);
+      score += Math.round(this.similarityScore(textCompact, compact) * 80);
+    }
+
+    // Short brands like Burn are very easy false positives in OCR garbage.
+    if (isShortBrand && !textTokens.includes(compact)) score = Math.min(score, 70);
+
+    return score;
+  };
+
+  app.getLikelyBrands = function(sourceText, limit = 3) {
+    const ranked = this.getBrandCatalog()
+      .map(entry => ({ ...entry, score: this.scoreBrandCandidateV28(entry, sourceText) }))
+      .filter(item => item.score >= 180)
+      .sort((a, b) => b.score - a.score);
+    return ranked.slice(0, limit);
+  };
+
+  app.getLockedBrand = function(sourceText) {
+    const ranked = this.getLikelyBrands(sourceText, 3);
+    if (!ranked.length) return null;
+    const top = ranked[0];
+    const second = ranked[1] || null;
+    const topCompact = this.compactComparableText(top.brand);
+    const textTokens = this.photoTokensV28(sourceText);
+    const textCompact = this.compactComparableText(this.normalizePhotoOCRTextV28(sourceText));
+    const exact = textCompact.includes(topCompact) || textTokens.includes(topCompact);
+    const gap = second ? top.score - second.score : top.score;
+
+    // Do not lock short brands from noisy OCR unless there is a clean exact token.
+    if (topCompact.length <= 4 && !textTokens.includes(topCompact)) return null;
+
+    if ((exact && top.score >= 220) || top.score >= 380 || (top.score >= 300 && gap >= 100)) {
+      return { ...top, gap };
+    }
+    return null;
+  };
+
+  app.scorePhotoFlavorMatch = function(flavor, sourceText, brandContext = null) {
+    const sourceNorm = this.normalizePhotoOCRTextV28(sourceText);
+    const sourceCompact = this.compactComparableText(sourceNorm);
+    const sourceTokens = this.photoTokensV28(sourceNorm);
+    const sourceTokenSet = new Set(sourceTokens);
+    const searchTexts = this.getPhotoSearchTexts ? this.getPhotoSearchTexts(sourceNorm) : [sourceNorm];
+
+    const pure = this.getPurePhotoFlavorNameV28(flavor);
+    const brandCompact = pure.brandCompact;
+    const nameTokens = pure.tokens;
+    const nameCompact = pure.compact;
+    const labelCompact = this.compactComparableText(`${pure.brand} ${pure.raw}`);
+
+    let score = 0;
+    const reasons = [];
+    if (!sourceCompact) return { score: 0, reasons: [] };
+
+    // Brand score is useful, but must not dominate if brand was guessed weakly.
+    let brandScore = 0;
+    if (brandContext && this.compactComparableText(brandContext.brand) === brandCompact) {
+      brandScore = brandContext.score || 0;
+    } else {
+      brandScore = this.scoreBrandCandidateV28(
+        { brand: flavor.brand, norm: pure.brand, compact: brandCompact, tokens: pure.brandTokens, aliases: [] },
+        sourceNorm
+      );
+    }
+    if (brandScore >= 260) {
+      score += Math.round(brandScore * 0.75);
+      reasons.push('совпал бренд');
+    } else if (brandScore >= 180) {
+      score += Math.round(brandScore * 0.35);
+      reasons.push('бренд близок');
+    }
+
+    // Exact flavor matching.
+    if (labelCompact.length >= 7 && sourceCompact.includes(labelCompact)) {
+      score += 620;
+      reasons.push('полное название найдено в OCR');
+    } else if (nameCompact.length >= 4 && sourceCompact.includes(nameCompact)) {
+      score += 470;
+      reasons.push('название вкуса найдено напрямую');
+    }
+
+    const hits = nameTokens.filter(token => sourceTokenSet.has(token) || sourceCompact.includes(token));
+    const hitCount = hits.length;
+    const ratio = nameTokens.length ? hitCount / nameTokens.length : 0;
+
+    const strongFlavorHits = hits.filter(token => this.photoStrongFlavorTokensV28.has(token));
+    if (hitCount) {
+      score += hitCount * 120;
+      score += Math.round(ratio * 180);
+      reasons.push(`совпало слов вкуса: ${hitCount}/${nameTokens.length || 1}`);
+    }
+
+    // If OCR saw only "strawberry", exact single Strawberry should beat Strawberry Jam/Coconut/etc.
+    const meaningfulSourceFlavorTokens = sourceTokens.filter(token => this.photoStrongFlavorTokensV28.has(token));
+    const extraNameTokens = nameTokens.filter(token => !sourceTokenSet.has(token) && !sourceCompact.includes(token));
+    if (meaningfulSourceFlavorTokens.length === 1 && strongFlavorHits.length === 1) {
+      if (nameTokens.length === 1) score += 240;
+      else score -= Math.min(180, extraNameTokens.length * 70);
+    }
+
+    if (nameTokens.length > 1 && hitCount === 1 && extraNameTokens.length >= 1) {
+      score -= extraNameTokens.length * 45;
+    }
+
+    let bestNameSimilarity = 0;
+    searchTexts.forEach(line => {
+      const lineNorm = this.normalizePhotoOCRTextV28(line);
+      bestNameSimilarity = Math.max(bestNameSimilarity, this.similarityScore(lineNorm, pure.raw));
+      bestNameSimilarity = Math.max(bestNameSimilarity, this.similarityScore(this.compactComparableText(lineNorm), nameCompact));
+    });
+    if (bestNameSimilarity >= 0.82) {
+      score += 190;
+      reasons.push('вкус почти совпал по OCR');
+    } else if (bestNameSimilarity >= 0.66) {
+      score += 95;
+      reasons.push('вкус похож по OCR');
+    }
+
+    // Prefer cleaner names when only one exact flavor token is detected.
+    if (meaningfulSourceFlavorTokens.length === 1 && nameTokens.length > 2) score -= 60;
+
+    // Wrong brand should not be fatal when brand is not locked, but exact known other brand loses a little.
+    const likelyLocked = this.getLockedBrand(sourceNorm);
+    if (likelyLocked && this.compactComparableText(likelyLocked.brand) !== brandCompact) {
+      score -= 420;
+      reasons.push('чужой бренд');
+    }
+
+    score = Math.round(score);
+    return { score, reasons: Array.from(new Set(reasons)).slice(0, 4) };
+  };
+
+  app.findPhotoMatches = function(sourceText, limit = 10) {
+    const cleaned = this.normalizePhotoOCRTextV28(sourceText);
+    if (!cleaned || cleaned.length < 2) return [];
+
+    const lockedBrand = this.getLockedBrand(cleaned);
+    const likelyBrands = lockedBrand ? [lockedBrand] : this.getLikelyBrands(cleaned, 3);
+
+    let candidateFlavors = this.state.flavors.slice();
+
+    // Only a strong locked brand may restrict the candidate list.
+    // Weak brand guesses are only context, not a filter.
+    if (lockedBrand) {
+      const lockedCompact = this.compactComparableText(lockedBrand.brand);
+      candidateFlavors = this.state.flavors.filter(flavor => this.compactComparableText(flavor.brand) === lockedCompact);
+    }
+
+    const results = candidateFlavors
+      .map(flavor => {
+        const brandContext = likelyBrands.find(item => this.compactComparableText(item.brand) === this.compactComparableText(flavor.brand)) || null;
+        const match = this.scorePhotoFlavorMatch(flavor, cleaned, brandContext);
+        const confidence = this.clampInt(Math.min(99, Math.max(8, Math.round(match.score / 8.2))), 0, 99);
+        return { flavor, score: match.score, reasons: match.reasons, confidence, lockedBrand };
+      })
+      .filter(item => item.score >= (lockedBrand ? 135 : 175))
+      .sort((a, b) => b.score - a.score || this.getFlavorLabel(a.flavor).localeCompare(this.getFlavorLabel(b.flavor), 'ru'))
+      .slice(0, limit);
+
+    return results;
+  };
+
+  if (!app._v28BasePreprocessPhotoToCanvas && typeof app.preprocessPhotoToCanvas === 'function') {
+    app._v28BasePreprocessPhotoToCanvas = app.preprocessPhotoToCanvas.bind(app);
+    app.preprocessPhotoToCanvas = function(img, mode = 'gray', cropPreset = 'full') {
+      if (cropPreset !== 'label') return this._v28BasePreprocessPhotoToCanvas(img, mode, cropPreset);
+      const srcW = img.naturalWidth || img.width || 1;
+      const srcH = img.naturalHeight || img.height || 1;
+      const sx = srcW * 0.18, sy = srcH * 0.22, sw = srcW * 0.64, sh = srcH * 0.58;
+      const scale = Math.min(2400 / Math.max(sw, sh), 2.5);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(520, Math.round(sw * scale));
+      canvas.height = Math.max(360, Math.round(sh * scale));
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        // Purple/yellow labels often need a stronger separation than normal grayscale.
+        let value = (max - min > 38) ? Math.min(255, Math.max(0, (gray - 96) * 2.65 + 128)) : Math.min(255, Math.max(0, (gray - 116) * 2.25 + 128));
+        if (mode === 'bw') value = value > 145 ? 255 : 0;
+        if (mode === 'invert') value = 255 - value;
+        data[i] = data[i + 1] = data[i + 2] = value;
+      }
+      ctx.putImageData(imageData, 0, 0);
+      return canvas;
+    };
+  }
+
+  if (!app._v28BaseExtractPhotoTexts && typeof app.extractPhotoTexts === 'function') {
+    app.extractPhotoTexts = async function(imgEl) {
+      if (typeof Tesseract === 'undefined') {
+        await this.ensureExternalLib('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js', 'Tesseract');
+      }
+      const tasks = [
+        { key: 'gray', label: 'Центр этикетки', crop: 'label', lang: 'eng' },
+        { key: 'gray', label: 'Полное фото', crop: this.state.photoCropPreset || 'full', lang: 'eng' },
+        { key: 'bw', label: 'Контрастный центр', crop: 'label', lang: 'eng+rus' },
+        { key: 'invert', label: 'Инверсия центра', crop: 'label', lang: 'eng' }
+      ];
+      const previews = [];
+      const textBlocks = [];
+      let bestConfidence = 0;
+
+      for (let idx = 0; idx < tasks.length; idx++) {
+        const task = tasks[idx];
+        const canvas = this.preprocessPhotoToCanvas(imgEl, task.key, task.crop);
+        previews.push({ label: task.label, dataUrl: canvas.toDataURL('image/png') });
+        this.renderPhotoPassPreviews(previews);
+        this.updatePhotoStatus(`OCR-проход ${idx + 1} из ${tasks.length}: ${task.label}…`, 'info');
+        const result = await Tesseract.recognize(canvas, task.lang, {
+          tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдеёжзийклмнопрстуфхцчшщъыьэюя -/()',
+          preserve_interword_spaces: '1',
+          logger: (message) => {
+            if (message.status === 'recognizing text') {
+              const pct = Math.round((message.progress || 0) * 100);
+              this.updatePhotoStatus(`OCR ${idx + 1}/${tasks.length}: ${task.label} — ${pct}%`, 'info');
+            }
+          }
+        });
+        const rawText = String(result && result.data && result.data.text ? result.data.text : '').trim();
+        const confidence = Number(result && result.data && result.data.confidence ? result.data.confidence : 0) || 0;
+        bestConfidence = Math.max(bestConfidence, confidence);
+        const normalized = this.normalizePhotoOCRTextV28(rawText);
+        if (rawText) textBlocks.push(rawText);
+        if (normalized && normalized !== rawText) textBlocks.push(normalized);
+
+        const quickMatches = this.findPhotoMatches(textBlocks.join('\n'), 3);
+        if (quickMatches.length && quickMatches[0].confidence >= 82 && confidence >= 35) break;
+      }
+
+      const merged = Array.from(new Set(textBlocks.join('\n').split(/\n+/).map(v => v.trim()).filter(Boolean))).join('\n');
+      return { text: merged, previews, confidence: bestConfidence, lockedBrand: this.getLockedBrand(merged) };
+    };
+  }
+
+  app.renderPhotoMatches = function(matches, sourceText) {
+    const container = document.getElementById('photo-results');
+    if (!container) return;
+    if (!matches.length) {
+      container.innerHTML = '<div class="photo-empty">Совпадений не найдено. Попробуй сфотографировать этикетку крупнее или вручную введи бренд и вкус, например: Overdose Strawberry.</div>';
+      this.refreshPhotoResultsSummary(0);
+      return;
+    }
+
+    const queryText = this.escapeHtml(sourceText || '');
+    const lockedBrand = matches[0] && matches[0].lockedBrand ? matches[0].lockedBrand : null;
+    const brandHint = lockedBrand ? `<div class="notice" style="margin-bottom:12px">Определён бренд: <strong>${this.escapeHtml(lockedBrand.brand)}</strong> · поиск ограничен вкусами этого бренда</div>` : '<div class="notice" style="margin-bottom:12px">Бренд не зафиксирован уверенно — поиск идёт по всей базе, приоритет у точного названия вкуса.</div>';
+
+    container.innerHTML = brandHint + matches.map((item, index) => `
+      <div class="photo-match-card ${index === 0 ? 'best' : ''}">
+        <div class="photo-match-top">
+          <div>
+            <div class="mix-title" style="font-size:1.02rem;line-height:1.3">${this.escapeHtml(item.flavor.brand)} ${this.escapeHtml(item.flavor.name)}</div>
+            <p class="text-sm" style="margin-top:6px">${this.escapeHtml(item.flavor.description || 'Без дополнительного описания')}</p>
+          </div>
+          <div class="text-right">
+            <div class="photo-match-score">${item.confidence}%</div>
+            <div class="text-xs muted">уверенность поиска</div>
+          </div>
+        </div>
+        <div class="photo-match-reasons">
+          ${item.reasons.map(reason => `<span class="badge badge-neutral">${this.escapeHtml(reason)}</span>`).join('')}
+          ${item.flavor.type ? `<span class="badge badge-primary">${this.escapeHtml(item.flavor.type)}</span>` : ''}
+          ${item.flavor.strength ? `<span class="badge badge-warning">${this.escapeHtml(item.flavor.strength)}</span>` : ''}
+        </div>
+        <div class="footer-note" style="margin-top:10px">OCR-текст: ${queryText}</div>
+        <div class="photo-actions" style="margin-top:12px">
+          <button type="button" class="btn btn-primary btn-sm" onclick="app.addPhotoMatchToGenerator('${String(item.flavor.id).replace(/'/g, "\\'")}')">Это он — добавить в выбор вкусов</button>
+        </div>
+      </div>
+    `).join('');
+    this.refreshPhotoResultsSummary(matches.length);
+  };
+})();
