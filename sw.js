@@ -1,10 +1,11 @@
-const CACHE_NAME = "hookah-mixology-v31-photo-search-split";
+const CACHE_NAME = "hookah-mixology-v32-mixology-engine-split";
 const APP_SHELL = [
   './',
   './index.html',
-  './app.js?v=31',
-  './photo-search.js?v=31',
-  './manifest.webmanifest?v=31',
+  './app.js?v=32',
+  './js/mixology-engine.js?v=32',
+  './photo-search.js?v=32',
+  './manifest.webmanifest?v=32',
   './icons/icon-120-v5.png',
   './icons/icon-152-v5.png',
   './icons/icon-167-v5.png',
