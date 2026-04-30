@@ -4342,3 +4342,271 @@ if (document.readyState === 'loading') {
     app.initPremiumNavV26();
   }
 })();
+
+
+/* v27 logic calibration:
+   - candy / lollipop is no longer treated as cooling
+   - stricter and more varied scoring
+   - better body role selection
+   - shorter labels inside layer visual
+*/
+(function(){
+  if (!window.app && typeof app !== 'undefined') window.app = app;
+  if (!window.app) return;
+  const app = window.app;
+
+  app.normalizeNameV27 = function(value) {
+    return this.normalizeText ? this.normalizeText(String(value || '')) : String(value || '').toLowerCase();
+  };
+
+  app.isCandyNotCoolingV27 = function(flavor) {
+    const text = this.normalizeNameV27([flavor && flavor.brand, flavor && flavor.name, flavor && flavor.description, flavor && flavor.type].join(' '));
+    return /леденц|леденец|леденцы|candy|candies|drops|drop|sorbet|сорбет|карамел|caramel|fruittella|frutella|жвачк|gum/.test(text);
+  };
+
+  app.isRealCoolingV27 = function(flavor) {
+    const text = this.normalizeNameV27([flavor && flavor.brand, flavor && flavor.name, flavor && flavor.description, flavor && flavor.type].join(' '));
+    if (this.isCandyNotCoolingV27(flavor)) return false;
+    return /(^|\s)(ice|cold|cool|frost|freeze|mint|menthol)(\s|$)|мята|ментол|супернова|supernova|arctic|арктик|iceberg|айсберг|ледяной|ледяная|мороз/.test(text);
+  };
+
+  app.applyCandyCoolingCorrectionV27 = function(flavor) {
+    if (!flavor) return flavor;
+    flavor.analysis = flavor.analysis || {};
+    flavor.analysis.traits = flavor.analysis.traits || {};
+    flavor.analysis.roleSuit = flavor.analysis.roleSuit || {};
+
+    if (this.isCandyNotCoolingV27(flavor) && !this.isRealCoolingV27(flavor)) {
+      flavor.analysis.category = flavor.analysis.category === 'cooling' ? 'candy' : (flavor.analysis.category || 'candy');
+      flavor.analysis.traits.cooling = Math.min(Number(flavor.analysis.traits.cooling || 0), 1);
+      flavor.analysis.traits.freshness = Math.max(Number(flavor.analysis.traits.freshness || 0), 2);
+      flavor.analysis.traits.candy = Math.max(Number(flavor.analysis.traits.candy || 0), 6);
+      flavor.analysis.traits.sweetness = Math.max(Number(flavor.analysis.traits.sweetness || 0), 6);
+      flavor.analysis.roleSuit.cooler = Math.min(Number(flavor.analysis.roleSuit.cooler || 0), 1);
+      flavor.analysis.roleSuit.accent = Math.max(Number(flavor.analysis.roleSuit.accent || 0), 6);
+      flavor.analysis.roleSuit.rounder = Math.max(Number(flavor.analysis.roleSuit.rounder || 0), 5);
+      flavor.analysis.loudness = Math.max(Number(flavor.analysis.loudness || 0), 4);
+      flavor.analysis.suppressionRisk = Math.min(Math.max(Number(flavor.analysis.suppressionRisk || 0), 2), 5);
+    }
+
+    if (this.isRealCoolingV27(flavor)) {
+      flavor.analysis.category = 'cooling';
+      flavor.analysis.traits.cooling = Math.max(Number(flavor.analysis.traits.cooling || 0), 5);
+      flavor.analysis.roleSuit.cooler = Math.max(Number(flavor.analysis.roleSuit.cooler || 0), 8);
+    }
+    return flavor;
+  };
+
+  if (!app._v27BasePatchFlavorForMethodology && typeof app.patchFlavorForMethodology === 'function') {
+    app._v27BasePatchFlavorForMethodology = app.patchFlavorForMethodology.bind(app);
+    app.patchFlavorForMethodology = function(flavor) {
+      const patched = this._v27BasePatchFlavorForMethodology(flavor);
+      return this.applyCandyCoolingCorrectionV27(patched);
+    };
+  }
+
+  app.styleBodyFitV27 = function(flavor, style) {
+    const a = flavor && flavor.analysis ? flavor.analysis : {};
+    const t = a.traits || {};
+    const cat = a.category || 'fruit';
+    let score = 0;
+
+    score += Number(a.roleSuit && a.roleSuit.body || 0) * 3.0;
+    score += Number(a.density || 0) * 0.85;
+    score += Number(a.persistence || 0) * 0.55;
+    score += Number(t.juicy || 0) * 0.45;
+    score += Number(t.sweetness || 0) * 0.25;
+    score -= Number(t.cooling || 0) * 1.7;
+    score -= Number(a.conflictRisk || 0) * 0.55;
+    score -= Number(a.suppressionRisk || 0) * 0.25;
+
+    if (cat === 'cooling') score -= 18;
+    if (cat === 'candy') score -= style === 'dessert' ? 1 : 5;
+
+    if (style === 'dessert') {
+      if (['dessert','creamy','candy'].includes(cat)) score += 7;
+      score += Number(t.creaminess || 0) * 1.0;
+      score -= Number(t.acidity || 0) * 0.65;
+      if (['citrus','tropical'].includes(cat)) score -= 5;
+    } else if (style === 'fresh' || style === 'citrus') {
+      if (['citrus','fruit','berry','tropical'].includes(cat)) score += 3;
+      score += Number(t.freshness || 0) * 0.75;
+      score += Number(t.acidity || 0) * 0.45;
+      if (cat === 'dessert' || cat === 'creamy') score -= 6;
+    } else if (style === 'berry') {
+      if (cat === 'berry') score += 6;
+      score += Number(t.berry || 0) * 0.85;
+      if (cat === 'dessert' || cat === 'creamy') score -= 2;
+    } else if (style === 'fruity' || style === 'universal') {
+      if (['fruit','berry','tropical','citrus','creamy'].includes(cat)) score += 3;
+      if (cat === 'dessert') score += style === 'universal' ? 1 : -2;
+    }
+
+    return score;
+  };
+
+  if (!app._v27BaseScoreFlavorForRole && typeof app.scoreMethodologyFlavorForRole === 'function') {
+    app._v27BaseScoreFlavorForRole = app.scoreMethodologyFlavorForRole.bind(app);
+    app.scoreMethodologyFlavorForRole = function(flavor, role, style, bodyFlavor) {
+      flavor = this.applyCandyCoolingCorrectionV27(flavor);
+      let score = this._v27BaseScoreFlavorForRole(flavor, role, style, bodyFlavor);
+      const a = flavor.analysis || {};
+      const t = a.traits || {};
+      const cat = a.category || 'fruit';
+
+      if (role === 'body') {
+        score += this.styleBodyFitV27(flavor, style) * 0.38;
+        if (cat === 'cooling') score -= 28;
+        if (this.isCandyNotCoolingV27(flavor)) score += style === 'dessert' ? 4 : -2;
+        if (Number(a.roleSuit && a.roleSuit.body || 0) < 5) score -= 10;
+      }
+
+      if (role === 'cooler' && !this.isRealCoolingV27(flavor)) score -= 30;
+
+      if (role === 'rounder') {
+        if (['dessert','creamy','candy','tropical'].includes(cat)) score += 4;
+        if (cat === 'cooling') score -= 12;
+      }
+
+      if (role === 'accent') {
+        if (cat === 'candy') score += 2;
+        if (Number(t.cooling || 0) >= 5) score -= 4;
+      }
+
+      if (bodyFlavor) {
+        const bodyCat = bodyFlavor.analysis && bodyFlavor.analysis.category;
+        if (role === 'support' && bodyCat === cat) score += 2;
+        if (role === 'rounder' && ['dessert','creamy','candy'].includes(cat)) score += 3;
+        if (role === 'accent' && bodyCat !== cat) score += 1.5;
+      }
+
+      return score;
+    };
+  }
+
+  app.compatibilityLabelV27 = function(score) {
+    if (score >= 90) return 'excellent';
+    if (score >= 82) return 'good';
+    if (score >= 72) return 'mid';
+    if (score >= 56) return 'risky';
+    return 'bad';
+  };
+
+  app.hashDeltaV27 = function(text, range) {
+    let hash = 0;
+    const s = String(text || '');
+    for (let i = 0; i < s.length; i++) hash = ((hash << 5) - hash + s.charCodeAt(i)) | 0;
+    const span = range * 2 + 1;
+    return Math.abs(hash) % span - range;
+  };
+
+  app.calibrateMixScoreV27 = function(result, meta) {
+    if (!result) return result;
+    const style = (meta && meta.style) || result.style || 'universal';
+    const items = (result.items || []).map(item => this.applyCandyCoolingCorrectionV27(item));
+    result.items = items;
+
+    const body = items.find(i => i.role === 'body') || items[0];
+    const cooler = items.find(i => i.role === 'cooler');
+    const conceptKey = String(result._historyConceptKey || result.mixConcept || result.styleVariant || '').toLowerCase();
+    const bodyAnalysis = body && body.analysis ? body.analysis : {};
+    const bodyTraits = bodyAnalysis.traits || {};
+    const bodySuit = Number(bodyAnalysis.roleSuit && bodyAnalysis.roleSuit.body || 0);
+    const bodyCat = bodyAnalysis.category || 'fruit';
+
+    let score = Number(result.compatibilityScore || (result.scoreBreakdown && result.scoreBreakdown.total) || 72);
+
+    const mainItems = items.filter(i => i.role !== 'cooler');
+    if (body && mainItems.length > 1 && typeof this.scorePair === 'function') {
+      const pairScores = mainItems.filter(i => i !== body).map(i => this.scorePair(body, i));
+      if (pairScores.length) {
+        const avgPair = pairScores.reduce((s, p) => s + Number(p.score || 0) - Number(p.conflict || 0) * 1.2, 0) / pairScores.length;
+        score += Math.round((avgPair - 4) * 1.3);
+      }
+    }
+
+    score += Math.round((bodySuit - 6) * 1.8);
+    score += this.hashDeltaV27(items.map(i => i.name + i.percent).join('|') + conceptKey, 3);
+
+    if (bodySuit < 4.5) score = Math.min(score, 58);
+    else if (bodySuit < 5.5) score = Math.min(score, 68);
+    else if (bodySuit < 6.5) score = Math.min(score, 77);
+
+    if (bodyCat === 'cooling') score = Math.min(score, 52);
+    if (bodyCat === 'candy' && style !== 'dessert') score = Math.min(score, 76);
+    if (style === 'dessert' && !['dessert','creamy','candy'].includes(bodyCat)) score = Math.min(score, 78);
+    if ((style === 'fresh' || style === 'citrus') && ['dessert','creamy'].includes(bodyCat)) score = Math.min(score, 78);
+    if (conceptKey.includes('dessert') && !['dessert','creamy','candy'].includes(bodyCat) && Number(bodyTraits.creaminess || 0) < 4) score = Math.min(score, 76);
+
+    if (cooler) {
+      const pct = Number(cooler.percent || 0);
+      if (pct >= 12) score = Math.min(score, 86);
+      if (pct >= 8 && style === 'dessert') score = Math.min(score, 84);
+      if (pct >= 5 && bodyCat === 'dessert') score = Math.min(score, 86);
+    }
+
+    const risks = Array.isArray(result.risks) ? result.risks.slice() : [];
+    if (bodySuit < 5.5 && !risks.some(r => String(r.text || '').includes('роль центра'))) {
+      risks.push({ level: 'medium', text: 'Тело выбрано спорно: вкус слабоват для роли центра, лучше использовать его как поддержку или акцент.' });
+    }
+    if (this.isCandyNotCoolingV27(body) && bodyCat === 'candy' && style !== 'dessert' && !risks.some(r => String(r.text || '').includes('конфетное тело'))) {
+      risks.push({ level: 'medium', text: 'Конфетное тело может звучать слишком сладко и плоско. Лучше держать его в поддержке или округлителе.' });
+    }
+    result.risks = risks;
+
+    const high = risks.filter(r => r.level === 'high').length;
+    const med = risks.filter(r => r.level === 'medium').length;
+    score -= high * 8 + med * 3;
+
+    score = Math.max(35, Math.min(94, Math.round(score)));
+    result.compatibilityScore = score;
+    result.compatibilityLabel = this.compatibilityLabelV27(score);
+    if (result.scoreBreakdown) result.scoreBreakdown.total = score;
+
+    if (score >= 90) result.overallVerdict = `Очень сильный микс: база "${result.bodyName}" читаемая, роли распределены грамотно.`;
+    else if (score >= 82) result.overallVerdict = `Хороший рабочий микс: идея понятная, тело "${result.bodyName}" держит композицию.`;
+    else if (score >= 72) result.overallVerdict = `Условно хороший микс: логика есть, но нужна точная процентовка и контроль сильных нот.`;
+    else if (score >= 56) result.overallVerdict = `Спорный микс: часть логики работает, но есть заметные слабые места в теле или ролях.`;
+    else result.overallVerdict = `Слабый микс: композиция может развалиться, лучше изменить тело или упростить состав.`;
+
+    return result;
+  };
+
+  if (!app._v27BaseBuildMethodologyVariant && typeof app.buildMethodologyVariant === 'function') {
+    app._v27BaseBuildMethodologyVariant = app.buildMethodologyVariant.bind(app);
+    app.buildMethodologyVariant = function(combo, style, coolingLevel, concept, history) {
+      const result = this._v27BaseBuildMethodologyVariant(combo, style, coolingLevel, concept, history);
+      return this.calibrateMixScoreV27(result, { style, coolingLevel });
+    };
+  }
+
+  if (!app._v27BaseRenderResults && typeof app.renderResults === 'function') {
+    app._v27BaseRenderResults = app.renderResults.bind(app);
+    app.renderResults = function(results, meta) {
+      const calibrated = (results || []).map(res => this.calibrateMixScoreV27(res, meta));
+      return this._v27BaseRenderResults(calibrated, meta);
+    };
+  }
+
+  if (!app._v27BaseBuildPackingVisualization && typeof app.buildPackingVisualization === 'function') {
+    app.shortFlavorLabelV27 = function(item, maxLen) {
+      let name = String((item && item.name) || '').replace(/\s*\/\s*[^/]+$/,'').trim();
+      name = name.replace(/,\s*/g, ', ');
+      if (name.length > maxLen) name = name.slice(0, Math.max(8, maxLen - 1)).trim() + '…';
+      return name;
+    };
+
+    app._v27BaseBuildPackingVisualization = app.buildPackingVisualization.bind(app);
+    app.buildPackingVisualization = function(items, style) {
+      const html = this._v27BaseBuildPackingVisualization(items, style);
+      if ((this.getPackingStyle ? this.getPackingStyle() : style) !== 'layers') return html;
+      let updated = html;
+      (items || []).forEach(item => {
+        const full = this.escapeHtml(String(item.name || ''));
+        const short = this.escapeHtml(this.shortFlavorLabelV27(item, 22));
+        updated = updated.replaceAll(`${full} ${Number(item.percent)}%`, `${short} ${Number(item.percent)}%`);
+      });
+      return updated.replace(/ЖАР ↓/g, 'Жар сверху ↓');
+    };
+  }
+})();
